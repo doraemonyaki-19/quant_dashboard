@@ -1,0 +1,13 @@
+type,strike,spot,t_days,bid,ask,last,bar_iv,bar_delta,bar_theta,bar_gamma,bar_vega
+# Paste one row per option from the Barchart SPCX chain (expiration 2026-12-18).
+# type      : call or put
+# strike    : option strike
+# spot      : SPCX underlying price at snapshot time (same for every row)
+# t_days    : calendar days from snapshot date to 2026-12-18
+# bid/ask   : NBBO quote (mid is used as the market price); last is fallback
+# bar_iv    : Barchart-displayed Implied Volatility as a DECIMAL (e.g. 0.5512 for 55.12%)
+# bar_delta : Barchart-displayed Delta (optional but improves the test)
+# bar_theta,bar_gamma,bar_vega : optional, for extra cross-checks
+# --- example rows (DELETE these and paste real data) ---
+call,35,35.0,151,5.05,5.25,5.15,0.5500,0.5600,,,
+put,35,35.0,151,4.50,4.70,4.60,0.5500,-0.4400,,,

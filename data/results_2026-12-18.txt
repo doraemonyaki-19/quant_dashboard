@@ -1,0 +1,27 @@
+==========================================================================
+SCORING MODELS AGAINST data/spcx_2026-12-18.csv
+  rows=153  r=4.300%  q=0.400%
+==========================================================================
+  reference IV column: yahoo_iv  [Yahoo (proxy -- paste bar_iv to test Barchart)]
+
+model                               RMSE full  RMSE core  fails     n
+Black-Scholes-Merton (European, q)    0.15345    0.03523      3   150
+CRR binomial (American)               0.11405    0.03100      1   152
+Black-76 (forward)                    0.15345    0.03523      3   150
+  RMSE = model IV(from mid) vs yahoo_iv. core = liquid strikes |K/S-1|<=0.25.
+
+American-vs-European tell -- in-the-money PUTS, IV(BSM) - IV(CRR):
+     K/S  IV gap (bp)
+    3.23       2959.5
+    3.07       2232.3
+    2.95       2127.5
+    2.87       1962.1
+    2.83       2053.3
+    2.79       1898.3
+  large gap => European BSM must distort IV to fit an American price;
+  ~0 gap (near/OTM) => BSM and CRR are indistinguishable there.
+
+CLOSEST on liquid core: CRR binomial (American)
+NOTE: any full-chain edge for CRR comes from deep-ITM puts, where
+European pricing is degenerate and quotes are illiquid -- not proof
+of Barchart's engine. Paste Barchart's bar_iv to test them directly.

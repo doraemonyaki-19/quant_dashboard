@@ -1,0 +1,4 @@
+run_local,symbol,spot,q,months,n_expiries,featured_expiry,ref_iv,lowest_rmse_model,dir
+2026-07-20T21:46:21,SPCX,119.85,0.0,12,10,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260720-214621
+2026-07-20T22:00:34,SPY,742.09,0.010140279113959292,12,26,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPY_20260720-220034
+2026-07-20T22:04:03,SPCX,119.85,0.0,12,10,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260720-220403
