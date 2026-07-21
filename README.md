@@ -1,11 +1,26 @@
 # Option-Pricing Model — Reconstruction Workflow (any ticker)
 
-**Goal:** understand the model Barchart uses to compute the option prices,
-implied volatility (IV), and greeks shown on
-`barchart.com/stocks/quotes/SPCX/options?expiration=2026-12-18-m`, and
-determine which candidate model is *closest* to what they display. The workflow
-started SPCX-specific and now **generalizes to any US ticker with listed
-options** — enter it in a box in the local web app.
+**Motivating question:** what model computes the option prices, implied
+volatility (IV), and greeks that a quote vendor like Barchart *displays*? This workflow
+reconstructs a chain from scratch, determines which candidate model is *closest*,
+and now **generalizes to any US ticker with listed options** — enter it in a box
+in the local web app.
+
+> **Two clarifications up front (things that are easy to get wrong):**
+>
+> 1. **Data source is Yahoo Finance (`yfinance`), not Barchart.** Nothing is
+>    fetched from Barchart — its endpoints are token/cookie-gated and the page is
+>    Cloudflare-protected. Barchart survives here only as (a) the motivating
+>    question and (b) *optional* `bar_iv` / `bar_delta` columns you may paste
+>    displayed values into to compare. The reference IV used everywhere is
+>    Yahoo's.
+> 2. **We do NOT use only the 2026-12-18 expiry.** The dashboard pulls the **full
+>    expiration cross-section within 12 months** (~10–14 expiries) and uses all of
+>    it for the vol surface, greeks(T), parameters(T) and term structure; the
+>    Strategies tab spans ~4 different expiries. Only the **model-scoring** step
+>    focuses on a single *featured* expiry — the one nearest ~150 days, which for
+>    SPCX happens to be 2026-12-18. The standalone `--snapshot` CLI is the only
+>    piece that reads just the one `data/spcx_2026-12-18.csv` file.
 
 ## Interactive dashboard — type any ticker
 
@@ -35,44 +50,45 @@ with a data-derived bin size (shown in its title).
 
 ---
 
-**Approach:** Barchart does not publish equations on the page, and the site is
-Cloudflare-gated (live scraping is unreliable) — so this workflow does not
-depend on reading their docs. Instead it (1) hypothesizes the small set of
-models any quote vendor could plausibly use, (2) implements each, and (3)
-provides a harness that determines the closest model — analytically now, and
-empirically the moment you paste in a real chain snapshot.
+**Approach:** no vendor publishes their pricing equations, so this workflow does
+not depend on reading anyone's docs. It (1) hypothesizes the small set of models
+any quote vendor could plausibly use, (2) implements each, and (3) provides a
+harness that determines the closest model — analytically, and empirically against
+a **live Yahoo chain**.
 
 > **Epistemic status.** The conclusion below is an inference from option theory
-> plus a real chain from **Yahoo** (`src/fetch_chain.py`). It is *not* a quote
-> from Barchart's documentation, and Yahoo's IV is Yahoo's calc, not Barchart's.
-> To test Barchart specifically, paste their displayed IV/delta into the
-> `bar_iv`/`bar_delta` columns of `data/spcx_2026-12-18.csv` and re-run.
+> plus live chains from **Yahoo** (`yfinance`). The reference IV it scores against
+> is **Yahoo's own IV**, which is a *proxy* — it is not a quote from Barchart's
+> documentation. To test a specific vendor (e.g. Barchart) instead, paste their
+> displayed IV/delta into the optional `bar_iv` / `bar_delta` columns of a
+> snapshot CSV and re-run `--snapshot`; the harness then scores against those.
 
-> **Data status (2026-07-20).** Barchart's endpoints need session tokens and the
-> page is Cloudflare-gated, so the chain was pulled from **Yahoo** instead:
-> `data/spcx_2026-12-18.csv` — SPCX spot **$123.76**, 80 calls + 73 puts, ATM IV
-> ≈ 78%. Saved run: `data/results_2026-12-18.txt`.
+> **Data source.** All option data comes from the **Yahoo Finance option chain**
+> via `yfinance` — spot, per-strike bid/ask/last, open interest, and Yahoo's IV.
+> The saved reference snapshot `data/spcx_2026-12-18.csv` (SPCX, 80 calls + 73
+> puts) is one such Yahoo pull; the live app/`build_dashboard.py` re-fetch fresh
+> data (across all ≤12-month expiries) on every run.
 
 ---
 
 ## The hypotheses (candidate models)
 
-| # | Model | Exercise | Why it's a candidate |
-|---|-------|----------|----------------------|
-| 1 | **Black-Scholes-Merton** (with continuous dividend yield `q`) | European | The de-facto display model for listed equity/ETF options across quote vendors. Closed-form price + greeks; IV by inversion. |
-| 2 | **Cox-Ross-Rubinstein binomial** | American | *Theoretically correct*: every listed US single-name/ETF option is American-exercise, so early exercise (esp. ITM puts, pre-dividend calls) matters. |
-| 3 | **Black-76** (option on the forward) | European | Used for futures/index options. For equities it is **algebraically identical to BSM** once `F = S·e^{(r−q)T}` — included only to show it is not a distinct hypothesis. |
+| # | Model                                                                 | Exercise | Why it's a candidate                                                                                                                                                             |
+| - | --------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | **Black-Scholes-Merton** (with continuous dividend yield `q`) | European | The de-facto display model for listed equity/ETF options across quote vendors. Closed-form price + greeks; IV by inversion.                                                      |
+| 2 | **Cox-Ross-Rubinstein binomial**                                | American | *Theoretically correct*: every listed US single-name/ETF option is American-exercise, so early exercise (esp. ITM puts, pre-dividend calls) matters.                           |
+| 3 | **Black-76** (option on the forward)                            | European | Used for futures/index options. For equities it is**algebraically identical to BSM** once `F = S·e^{(r−q)T}` — included only to show it is not a distinct hypothesis. |
 
 ### Parameters (identical inputs to every model)
 
-| Symbol | Meaning | Source |
-|--------|---------|--------|
-| `S` | SPCX underlying price | live quote at snapshot time |
-| `K` | strike | the option row |
-| `T` | years to expiry | (calendar days to **2026-12-18**) / 365 |
-| `r` | risk-free rate (cont-comp) | short-dated US Treasury (~3M) |
-| `q` | dividend yield (cont-comp) | fetched **per ticker** from trailing-12-month dividends (`t.dividends / spot`). **SPCX pays none → q = 0**, so American calls ≡ European calls and only puts can differ; for a dividend payer `q > 0` also enables early exercise on calls near ex-div dates |
-| `σ` | volatility | **solved** so model price = market (mid) price → this *is* the displayed IV |
+| Symbol | Meaning                    | Source                                                                                                                                                                                                                                                                        |
+| ------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `S`  | underlying price           | live Yahoo quote at fetch time                                                                                                                                                                                                                                                |
+| `K`  | strike                     | the option row                                                                                                                                                                                                                                                                |
+| `T`  | years to expiry            | each expiry's own (calendar days) / 365 —**every expiration ≤ 12 months**, not just one                                                                                                                                                                               |
+| `r`  | risk-free rate (cont-comp) | short-dated US Treasury (flat placeholder in`rate_for()`)                                                                                                                                                                                                                   |
+| `q`  | dividend yield (cont-comp) | fetched**per ticker** from trailing-12-month dividends (`t.dividends / spot`). **SPCX pays none → q = 0**, so American calls ≡ European calls and only puts can differ; for a dividend payer `q > 0` also enables early exercise on calls near ex-div dates |
+| `σ` | volatility                 | **solved** so model price = market (mid) price → this *is* the displayed IV                                                                                                                                                                                          |
 
 IV is not an input Barchart looks up — it is the number that makes the chosen
 model reprice the option to the market mid. That inversion is the whole game,
@@ -105,7 +121,6 @@ inverting the model to the option's market mid.** Reasoning:
 1. **BSM and Black-76 are the same model here.** Black-76 on the forward
    collapses to BSM for an equity/ETF. So the real contest is
    **European (BSM) vs American (CRR binomial)**.
-
 2. **For a low-dividend name like SPCX the two are indistinguishable on the
    call side and most of the put side.** The `--demo` run (below) prices a
    realistic SPCX-like chain under both models:
@@ -115,7 +130,6 @@ inverting the model to the option's market mid.** Reasoning:
    - **Puts:** they agree near/out-of-the-money but diverge **deep in-the-money**,
      where the American early-exercise premium is real: the gap grows to
      ~**$0.18 / ~230 bp of IV** by 30% ITM.
-
 3. Therefore the parsimonious model that reproduces the displayed chain to
    precision is **BSM**. The *only* place a snapshot can actually distinguish a
    binomial/American engine from BSM is **deep-ITM puts** — so that is where the
@@ -128,12 +142,16 @@ American model; if BSM wins everywhere, they display the European closed form.
 
 ### What the real Yahoo chain showed (`--snapshot`)
 
-Inverting each model to the market **mid** on the actual 2026-12-18 chain:
+This particular table is the **single-expiry** `--snapshot` analysis on the saved
+`data/spcx_2026-12-18.csv` (the ~5-month expiry) — the model-scoring step. The
+dashboard runs the same scoring on whichever expiry is nearest ~150 days, while
+its surface/greeks/params use the whole ≤12-month cross-section. Inverting each
+model to the market **mid**:
 
-| | RMSE vs Yahoo IV (full chain) | RMSE on liquid core (\|K/S−1\|≤0.25) | solver fails |
-|--|--|--|--|
-| BSM / Black-76 | 0.153 | 0.035 | 3 |
-| CRR (American) | 0.114 | 0.031 | 1 |
+|                | RMSE vs Yahoo IV (full chain) | RMSE on liquid core (\|K/S−1\|≤0.25) | solver fails |
+| -------------- | ----------------------------- | -------------------------------------- | ------------ |
+| BSM / Black-76 | 0.153                         | 0.035                                  | 3            |
+| CRR (American) | 0.114                         | 0.031                                  | 1            |
 
 - **On the liquid core the models are effectively tied** — the ~3.5 vol-point
   RMSE is just Yahoo computing IV from *last* while we invert from *mid*, not a
@@ -186,14 +204,17 @@ python src/determine_model.py --demo --spot 123.76 --rate 0.043 --div-yield 0 --
 All of `surfaces.py`, `build_dashboard.py` and `app.py` take **any `--symbol`**;
 they fetch that ticker's chain, dividend yield, and expirations automatically.
 
-### Capturing a real snapshot
+### Optional: score against a specific vendor's IV (e.g. Barchart)
 
-The live page is Cloudflare-gated, so the reliable path is manual:
-copy the option chain rows into a CSV shaped like
-[`data/snapshot_template.csv`](data/snapshot_template.csv) — one row per
-option, with Barchart's displayed IV/delta. Include several **deep in-the-money
-puts** — that is the only region that separates the American from the European
-model. Then run `--snapshot`.
+The normal flow needs no manual work — `fetch_chain.py`/the app pull everything
+from Yahoo automatically. This step is **only** if you want to score against a
+particular vendor's *displayed* IV instead of Yahoo's proxy. Copy that vendor's
+chain rows into a CSV shaped like
+[`data/snapshot_template.csv`](data/snapshot_template.csv) — one row per option,
+filling the `bar_iv` / `bar_delta` columns with their displayed values. Include
+several **deep in-the-money puts** — the only region that separates American from
+European. Then run `--snapshot`; the harness scores against `bar_iv` when present
+and falls back to `yahoo_iv` otherwise.
 
 ---
 
@@ -281,13 +302,13 @@ not investment advice**; SPCX spreads are wide, so price against real fills.
 Every run of the app or `build_dashboard.py` writes an **auditable bundle** of
 the exact data used and the results to `data/audit/<SYMBOL>_<timestamp>/`:
 
-| File | Contents |
-|------|----------|
-| `manifest.json` | run metadata (symbol, spot, q, rate, expiries, featured expiry, reference-IV source) + the full scoring summary and verdict — machine-readable |
-| `surface_points.csv` | every OTM strike used, with the raw **`mid` (input) → `iv` (output)** |
-| `term_structure.csv` | per-expiry ATM IV, all five greeks, rate, forward |
-| `scoring_chain.csv` | the **raw** featured-expiry chain (bid/ask/last/Yahoo-IV) fed to the model scoring |
-| `scoring_results.csv` | the per-model RMSE table |
+| File                    | Contents                                                                                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manifest.json`       | run metadata (symbol, spot, q, rate, expiries, featured expiry, reference-IV source) + the full scoring summary and verdict — machine-readable |
+| `surface_points.csv`  | every OTM strike used, with the raw**`mid` (input) → `iv` (output)**                                                                 |
+| `term_structure.csv`  | per-expiry ATM IV, all five greeks, rate, forward                                                                                               |
+| `scoring_chain.csv`   | the**raw** featured-expiry chain (bid/ask/last/Yahoo-IV) fed to the model scoring                                                         |
+| `scoring_results.csv` | the per-model RMSE table                                                                                                                        |
 
 `data/audit/index.csv` is an append-only log — one row per run (timestamp,
 symbol, spot, q, featured expiry, reference IV, lowest-RMSE model, bundle path),
