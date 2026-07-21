@@ -172,8 +172,11 @@ python src/surfaces.py --symbol SPCX --months 12
 # 3c) Render the full static, self-contained dashboard HTML for any ticker
 python src/build_dashboard.py --symbol SPCX      # -> dashboard.html
 
-# 3d) Interactive: any ticker in a box (drag-to-rotate 3D)
+# 3d) Interactive: any ticker in a box (drag-to-rotate 3D, Strategies tab)
 python src/app.py                                # -> http://127.0.0.1:8000
+
+# 3e) Term-structure trade ideas + payoff curves (CLI; also a dashboard tab)
+python src/strategies.py --symbol SPCX
 
 # 4) Analytical determination + distinguishability report (no data needed)
 python src/determine_model.py --demo
@@ -209,7 +212,8 @@ spcx_model/
 │   ├── surfaces.py               ← data-binned vol surface + greeks(T) + params(T);
 │   │                                figure builders + interactive plotly 3D + plotly_js()
 │   ├── determine_model.py        ← score_rows()/score_models() + --demo + --snapshot
-│   ├── build_dashboard.py        ← compute_context(symbol) + render_dashboard() (any ticker)
+│   ├── strategies.py             ← term-structure trades: analyze() + payoff curves
+│   ├── build_dashboard.py        ← compute_context(symbol) + render_dashboard(); Analysis + Strategies tabs
 │   └── app.py                    ← local web app: ticker box; serves bundled /plotly.js
 ├── data/
 │   ├── audit/                    ← per-run audit bundles + index.csv (see below)
@@ -251,6 +255,26 @@ The interactive 3D uses **Plotly bundled locally** (no CDN): the app serves it
 once at `/plotly.js` (browser-cached), and `build_dashboard.py` inlines it into
 `dashboard.html` so the file — and a re-published Artifact — render the rotatable
 surface offline.
+
+## Strategies tab — term-structure trades with payoff curves
+
+The dashboard has two tabs: **Analysis** (the surface / greeks / scoring above)
+and **Strategies**. The Strategies tab reads the vol term structure and proposes
+concrete trades that **sell the elevated near/event-window vol against the
+cheaper long-dated backwardation**, each priced from live mids (`strategies.py`):
+
+- **A) Call time butterfly** — long near + mid shoulders, short 2× the event
+  tenor; near delta/vega-neutral, long gamma. Wins if the hump flattens.
+- **B) ATM call calendar** — sell the event tenor, own long-dated vol; long
+  back-vega, positive theta. Harvests the backwardation.
+- **C) Bullish call diagonal** — long far ATM, short near OTM; net long delta
+  financed by the rich event vol.
+
+Each card shows the legs (strike/mid/IV/greeks), net premium + net greeks, and a
+**payoff curve** evaluated at the earliest leg expiry (longer legs revalued by
+BSM, IV held constant), with breakevens marked. Legs + summary are written to the
+run's audit bundle (`strategy_legs.csv`, `strategies.csv`). **Illustrative only —
+not investment advice**; SPCX spreads are wide, so price against real fills.
 
 ## Audit trail — every calculation is saved
 

@@ -1,0 +1,4 @@
+strategy,net_premium,type,net_delta,net_gamma,net_theta,net_vega,breakevens,max_profit,max_loss,horizon
+A) Call time butterfly (sell the Aug hump),-3.85,credit,-0.0389,0.00856,-0.0635,-0.0074,119.24|138.16,4.9538,-3.7881,2026-07-31
+B) ATM call calendar (sell Aug / buy long),11.45,debit,0.0406,-0.00524,0.1386,0.1648,104.16|162.32,10.7856,-11.3486,2026-08-21
+C) Bullish call diagonal (long far / short near OTM hump),15.65,debit,0.1538,-0.00548,0.1409,0.1621,113.08|206.9,12.8777,-15.5486,2026-08-21

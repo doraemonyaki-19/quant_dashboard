@@ -1,0 +1,85 @@
+{
+  "symbol": "NVDA",
+  "generated_local": "2026-07-21T13:39:23",
+  "data_source": "Yahoo Finance option chain (yfinance)",
+  "asof": "2026-07-21",
+  "spot": 206.71,
+  "dividend_yield_q": 0.0013545546461501622,
+  "rate_used": 0.043,
+  "rate_note": "flat placeholder (rate_for); swap for a live Treasury curve",
+  "months": 12,
+  "n_expiries": 8,
+  "expiries": [
+    "2026-09-18",
+    "2026-10-16",
+    "2026-11-20",
+    "2026-12-18",
+    "2027-01-15",
+    "2027-02-19",
+    "2027-03-19",
+    "2027-06-17"
+  ],
+  "featured_expiry": "2026-12-18",
+  "featured_t_days": 150,
+  "reference_iv_column": "yahoo_iv",
+  "reference_iv_source": "Yahoo (proxy)",
+  "core_moneyness_band": 0.25,
+  "scoring": {
+    "models": [
+      {
+        "model": "Black-Scholes-Merton (European, q)",
+        "rmse_core": 0.038548,
+        "rmse_full": 0.417573,
+        "unpriced": 399,
+        "n": 376
+      },
+      {
+        "model": "CRR binomial (American)",
+        "rmse_core": 0.035555,
+        "rmse_full": 0.481875,
+        "unpriced": 347,
+        "n": 428
+      },
+      {
+        "model": "Black-76 (forward)",
+        "rmse_core": 0.038548,
+        "rmse_full": 0.417573,
+        "unpriced": 399,
+        "n": 376
+      }
+    ],
+    "lowest_rmse_core_model": "CRR binomial (American)",
+    "itm_put_iv_gap_bp": [
+      [
+        1.935,
+        1471.8
+      ],
+      [
+        1.742,
+        275.2
+      ],
+      [
+        1.572,
+        939.7
+      ],
+      [
+        1.548,
+        973.6
+      ],
+      [
+        1.475,
+        826.7
+      ],
+      [
+        1.451,
+        743.4
+      ]
+    ]
+  },
+  "files": [
+    "surface_points.csv",
+    "term_structure.csv",
+    "scoring_chain.csv",
+    "scoring_results.csv"
+  ]
+}

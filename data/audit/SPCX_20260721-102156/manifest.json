@@ -1,0 +1,91 @@
+{
+  "symbol": "SPCX",
+  "generated_local": "2026-07-21T10:21:56",
+  "data_source": "Yahoo Finance option chain (yfinance)",
+  "asof": "2026-07-21",
+  "spot": 126.84,
+  "dividend_yield_q": 0.0,
+  "rate_used": 0.043,
+  "rate_note": "flat placeholder (rate_for); swap for a live Treasury curve",
+  "months": 12,
+  "n_expiries": 14,
+  "expiries": [
+    "2026-07-24",
+    "2026-07-31",
+    "2026-08-07",
+    "2026-08-14",
+    "2026-08-21",
+    "2026-08-28",
+    "2026-09-18",
+    "2026-10-16",
+    "2026-11-20",
+    "2026-12-18",
+    "2027-01-15",
+    "2027-02-19",
+    "2027-03-19",
+    "2027-06-17"
+  ],
+  "featured_expiry": "2026-12-18",
+  "featured_t_days": 150,
+  "reference_iv_column": "yahoo_iv",
+  "reference_iv_source": "Yahoo (proxy)",
+  "core_moneyness_band": 0.25,
+  "scoring": {
+    "models": [
+      {
+        "model": "Black-Scholes-Merton (European, q)",
+        "rmse_core": 0.03925,
+        "rmse_full": 0.122144,
+        "unpriced": 4,
+        "n": 149
+      },
+      {
+        "model": "CRR binomial (American)",
+        "rmse_core": 0.034682,
+        "rmse_full": 0.073246,
+        "unpriced": 4,
+        "n": 149
+      },
+      {
+        "model": "Black-76 (forward)",
+        "rmse_core": 0.03925,
+        "rmse_full": 0.122144,
+        "unpriced": 4,
+        "n": 149
+      }
+    ],
+    "lowest_rmse_core_model": "CRR binomial (American)",
+    "itm_put_iv_gap_bp": [
+      [
+        3.154,
+        1881.5
+      ],
+      [
+        2.996,
+        1634.9
+      ],
+      [
+        2.878,
+        1500.0
+      ],
+      [
+        2.799,
+        1466.6
+      ],
+      [
+        2.759,
+        1550.9
+      ],
+      [
+        2.72,
+        1534.2
+      ]
+    ]
+  },
+  "files": [
+    "surface_points.csv",
+    "term_structure.csv",
+    "scoring_chain.csv",
+    "scoring_results.csv"
+  ]
+}

@@ -26,6 +26,7 @@ from determine_model import score_rows                        # noqa: E402
 from surfaces import (collect, div_yield, rate_for, spot_price,  # noqa: E402
                       fig_surface, fig_greeks, fig_params, _b64,
                       plotly_surface_html)
+from strategies import analyze, fig_payoff, write_strategy_csvs  # noqa: E402
 from fetch_chain import chain_rows                             # noqa: E402
 
 
@@ -78,8 +79,17 @@ def compute_context(symbol: str, months: int = 12,
   score = score_rows(rows, {"rate": feat_rate, "div_yield": q},
                      source=feat["expiry"])
 
+  # Term-structure trade ideas + payoff curves (guarded: never break the page)
+  strat = None
+  try:
+    strat = analyze(symbol, ticker=t, spot=S, q=q)
+    for s in strat["strategies"]:
+      s["payoff_png"] = _b64(fig_payoff(s, S))
+  except Exception as e:
+    sys.stderr.write(f"[strategies] warning: {e}\n")
+
   ivs = [d["atm_iv"] for d in per_expiry]
-  ctx = dict(symbol=symbol, spot=S, asof=asof, q=q, months=months,
+  ctx = dict(symbol=symbol, spot=S, asof=asof, q=q, months=months, strat=strat,
              n_exp=len(per_expiry), per_expiry=per_expiry, figs=figs,
              surf3d_html=surf3d_html, plotly_external=not embed_plotly,
              feat=feat, feat_rate=feat_rate, score=score,
@@ -183,6 +193,27 @@ def save_audit(ctx: dict) -> Path:
       w.writerow([m["pretty"], _nan_to_none(round(m["rmse_core"], 6)),
                   _nan_to_none(round(m["rmse_full"], 6)), m["fails"], m["n"]])
 
+  # strategy legs + summary (same bundle, if strategies were computed)
+  if ctx.get("strat"):
+    leg_rows, strat_rows = [], []
+    for s in ctx["strat"]["strategies"]:
+      for L in s["legs"]:
+        leg_rows.append(dict(strategy=s["name"], qty=L["qty"], kind=L["kind"],
+                             expiration=L["expiration"], t_days=L["t_days"],
+                             strike=L["strike"], bid=L["bid"], ask=L["ask"],
+                             mid=round(L["mid"], 4), iv=round(L["iv"], 6),
+                             delta=round(L["delta"], 5), gamma=round(L["gamma"], 6),
+                             theta=round(L["theta"], 5), vega=round(L["vega"], 5)))
+      g = s["net"]
+      strat_rows.append(dict(strategy=s["name"], net_premium=round(s["premium"], 4),
+                             type=s["ptype"], net_delta=round(g["delta"], 4),
+                             net_gamma=round(g["gamma"], 5), net_theta=round(g["theta"], 4),
+                             net_vega=round(g["vega"], 4),
+                             breakevens="|".join(map(str, s["breakevens"])),
+                             max_profit=s["max_profit"], max_loss=s["max_loss"],
+                             horizon=s["horizon_exp"]))
+    write_strategy_csvs(base, leg_rows, strat_rows)
+
   idx = ROOT / "data" / "audit" / "index.csv"
   fresh = not idx.exists()
   with open(idx, "a", newline="", encoding="utf-8") as fh:
@@ -246,7 +277,7 @@ def _pill_note(q: float) -> str:
 
 def _shell(searchbar: str, body: str) -> str:
   return (STYLE + '\n<div class="wrap"><div class="inner">\n'
-          + searchbar + "\n" + body + "\n</div></div>\n" + SPINNER)
+          + searchbar + "\n" + body + "\n</div></div>\n" + SPINNER + TABS_JS)
 
 
 def render_dashboard(ctx: dict) -> str:
@@ -273,11 +304,91 @@ def render_dashboard(ctx: dict) -> str:
       trows=_term_rows(ctx["per_expiry"]), gdefs=gdefs, **sf)
   # Plotly HTML holds literal { } (JS/JSON) -> inject after .format via sentinel.
   body = body.replace("%%SURF3D%%", ctx["surf3d_html"])
+
+  n_strat = len(ctx["strat"]["strategies"]) if ctx.get("strat") else 0
+  tabbar = (
+      '<div class="tabbar" role="tablist">'
+      '<button class="tabbtn" role="tab" aria-selected="true" '
+      'data-tab="tab-analysis">Analysis</button>'
+      '<button class="tabbtn" role="tab" aria-selected="false" '
+      f'data-tab="tab-strategies">Strategies<span class="badge">{n_strat}</span>'
+      '</button></div>')
+  tabbed = (tabbar
+            + '<div class="tabpanel active" id="tab-analysis" role="tabpanel">'
+            + body + '</div>'
+            + '<div class="tabpanel" id="tab-strategies" role="tabpanel">'
+            + _strategy_panel(ctx) + '</div>')
+
   # App mode: load the locally-bundled plotly.js once (served at /plotly.js,
   # browser-cached) before the plot's inline init script runs.
   if ctx.get("plotly_external"):
-    body = '<script src="/plotly.js"></script>\n' + body
-  return _shell(searchbar_html(sym), body)
+    tabbed = '<script src="/plotly.js"></script>\n' + tabbed
+  return _shell(searchbar_html(sym), tabbed)
+
+
+def _strategy_panel(ctx: dict) -> str:
+  """Strategies tab: term-structure trade cards with payoff curves."""
+  strat = ctx.get("strat")
+  if not strat or not strat["strategies"]:
+    return ('<div class="errbox" style="border-left-color:var(--warn)">'
+            '<h2>No strategy set available</h2><p>The chain for this ticker '
+            'did not yield the expiries needed to build the term-structure '
+            'trades.</p></div>')
+  q_disp = "0" if strat["q"] < 1e-4 else f"{strat['q']*100:.2f}%"
+  out = [
+      f'<p class="strat-intro"><b>Term-structure trades for {strat["symbol"]}</b> '
+      f'(spot ${strat["spot"]:,.2f}, q={q_disp}, ATM~{strat["strikeATM"]}). '
+      'Built from the vol term structure on the Analysis tab &mdash; selling the '
+      'elevated near/event-window vol against the cheaper long-dated '
+      'backwardation. Priced from live mids; payoff is evaluated at the '
+      '<b>earliest leg expiry</b>, longer legs revalued by BSM with IV held '
+      'constant. Per share (contract &times;100).</p>']
+
+  for s in strat["strategies"]:
+    legs = "".join(
+        f'<tr><td>{"+" if L["qty"]>0 else ""}{L["qty"]}{L["kind"]}</td>'
+        f'<td>{L["expiration"]}</td><td>{L["t_days"]}</td>'
+        f'<td>{L["strike"]:.0f}</td><td>{L["mid"]:.2f}</td>'
+        f'<td>{L["iv"]*100:.1f}</td><td>{L["delta"]:.3f}</td>'
+        f'<td>{L["theta"]:.3f}</td><td>{L["vega"]:.3f}</td></tr>'
+        for L in s["legs"])
+    g = s["net"]
+    prem_chip = (f'<span class="chip {s["ptype"]}">'
+                 f'{s["ptype"]} ${abs(s["premium"]):.2f}/sh'
+                 f' (${abs(s["premium"])*100:.0f})</span>')
+    chips = (prem_chip
+             + f'<span class="chip">Δ {g["delta"]:+.3f}</span>'
+             + f'<span class="chip">Γ {g["gamma"]:+.4f}</span>'
+             + f'<span class="chip">Θ {g["theta"]:+.3f}/d</span>'
+             + f'<span class="chip">vega {g["vega"]:+.3f}</span>')
+    be = (", ".join(f"${b:g}" for b in s["breakevens"])
+          if s["breakevens"] else "none in range")
+    out.append(
+        '<div class="strat">'
+        f'<div class="strat-hd"><h3>{s["name"]}</h3>'
+        f'<div class="th">{s["thesis"]}</div></div>'
+        '<div class="strat-body">'
+        '<div class="strat-legs"><div class="tablewrap"><table>'
+        '<thead><tr><th>Leg</th><th>Expiry</th><th>d</th><th>K</th><th>Mid</th>'
+        '<th>IV%</th><th>&Delta;</th><th>&Theta;/d</th><th>Vega</th></tr></thead>'
+        f'<tbody>{legs}</tbody></table></div>'
+        f'<div class="chips">{chips}</div>'
+        f'<div class="strat-be">Breakevens @ {s["horizon_exp"]}: {be} '
+        f'&middot; max +${s["max_profit"]:.2f} / min ${s["max_loss"]:.2f} per sh</div>'
+        '</div>'
+        f'<div class="strat-plot"><img src="{s["payoff_png"]}" '
+        f'alt="payoff curve for {s["name"]}"></div>'
+        '</div></div>')
+
+  out.append(
+      '<div class="flag" style="margin-top:6px">'
+      '<b>Read before trading.</b> Illustrative, <b>not investment advice</b>. '
+      'Priced at mid &mdash; SPCX spreads are wide, so much of the apparent edge '
+      'is inside the bid/ask; check your real fill. Payoff holds long-leg IV '
+      'constant (it won&rsquo;t be). Multi-expiry structures settle in stages. '
+      'q=0 &rArr; short ITM American puts risk early assignment. '
+      f'Snapshot {ctx["asof"]}.</div>')
+  return "\n".join(out)
 
 
 def searchbar_html(symbol: str, message: str = "") -> str:
@@ -411,6 +522,37 @@ STYLE = r"""<style>
   .searchbar button:hover { filter:brightness(1.06); }
   .sb-hint { color:var(--faint); font-size:12px; }
   .sb-msg { color:var(--warn); font-size:12.5px; font-family:var(--mono); }
+
+  /* tabs */
+  .tabbar { display:flex; gap:6px; margin-bottom:20px; border-bottom:1px solid var(--line); }
+  .tabbtn { font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--muted); background:none; border:0; cursor:pointer;
+    padding:11px 16px; border-bottom:2px solid transparent; margin-bottom:-1px; }
+  .tabbtn:hover { color:var(--ink); }
+  .tabbtn[aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); }
+  .tabpanel { display:none; }
+  .tabpanel.active { display:block; }
+  .tabbtn .badge { color:var(--faint); font-weight:600; margin-left:6px; }
+
+  /* strategy cards */
+  .strat-intro { color:var(--muted); font-size:13.5px; max-width:74ch; margin:0 0 18px; }
+  .strat { background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    box-shadow:var(--shadow); margin-bottom:18px; overflow:hidden; }
+  .strat-hd { padding:16px 18px 6px; }
+  .strat-hd h3 { margin:0 0 5px; font-size:16px; font-weight:800; letter-spacing:-.01em; }
+  .strat-hd .th { color:var(--muted); font-size:13px; max-width:80ch; }
+  .strat-body { display:grid; grid-template-columns:1.1fr 1fr; gap:8px 18px; padding:6px 18px 16px; align-items:start; }
+  .strat-legs table { margin-top:6px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip { font-family:var(--mono); font-size:11.5px; font-weight:600; border-radius:7px;
+    padding:4px 9px; border:1px solid var(--line); background:var(--surface-2); }
+  .chip.debit { color:var(--warn); } .chip.credit { color:var(--good); }
+  .chip.pos { color:var(--good); } .chip.neg { color:var(--warn); }
+  .strat-plot { background:var(--mount); border:1px solid var(--line); border-radius:8px;
+    padding:6px; overflow-x:auto; }
+  .strat-plot img { display:block; width:100%; height:auto; }
+  .strat-be { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:8px; }
+  @media (max-width:760px) { .strat-body { grid-template-columns:1fr; } }
 
   header.top { display:flex; flex-wrap:wrap; gap:18px 24px; align-items:flex-end;
     justify-content:space-between; border-bottom:1px solid var(--line); padding-bottom:22px; }
@@ -567,6 +709,27 @@ SPINNER = r"""
   });
   // stop + hide if the page is restored from bfcache with the overlay still on
   window.addEventListener("pageshow", stop);
+})();
+</script>"""
+
+TABS_JS = r"""
+<script>
+(function () {
+  var bar = document.querySelector(".tabbar");
+  if (!bar) return;
+  var btns = bar.querySelectorAll(".tabbtn");
+  btns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      btns.forEach(function (x) { x.setAttribute("aria-selected", "false"); });
+      document.querySelectorAll(".tabpanel").forEach(function (p) {
+        p.classList.remove("active");
+      });
+      b.setAttribute("aria-selected", "true");
+      var panel = document.getElementById(b.dataset.tab);
+      if (panel) panel.classList.add("active");
+      window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
+    });
+  });
 })();
 </script>"""
 
