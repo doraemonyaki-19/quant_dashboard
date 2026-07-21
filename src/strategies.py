@@ -1,11 +1,13 @@
 """Concrete term-structure trades from the live chain, priced with real quotes.
 
-Builds the structures proposed off the dashboard's vol term structure -- the
-August event hump vs the backwardated belly -- using actual bid/ask/mid from
-Yahoo, then reports net premium, net greeks, breakevens and a payoff curve
-(evaluated at the earliest leg expiry, longer legs revalued by BSM with IV held
-constant). `analyze()` is pure (no I/O) so the dashboard reuses it; the CLI
-prints a report and saves an audit bundle.
+Reads the ticker's ATM vol term structure, classifies its shape (interior hump /
+backwardation / upward / flat), and builds structures that sell the genuinely
+richest tenor for that shape against cheaper long-dated vol -- a butterfly when
+there is an interior hump to short, otherwise calendars/diagonals. Priced from
+actual bid/ask/mid from Yahoo, with net premium, net greeks, breakevens and a
+payoff curve (evaluated at the earliest leg expiry, longer legs revalued by BSM
+with IV held constant). `analyze()` is pure (no I/O) so the dashboard reuses it;
+the CLI prints a report and saves an audit bundle.
 
     python src/strategies.py --symbol SPCX
 
@@ -129,36 +131,93 @@ def analyze(symbol: str, ticker=None, spot=None, q=None):
     return min(exps, key=lambda e:
                abs((dt.date.fromisoformat(e) - today).days - days))
 
-  e_near, e_hump, e_mid, e_long = pick(10), pick(28), pick(59), pick(150)
   Katm = round(S)
   cache = {}
 
   def lq(exp, k, call=True):
     return leg_quote(t, exp, k, call, S, q, today, cache)
 
+  # Distinct tenors across the front-to-mid-to-long span, deduped by expiry.
+  tenors = []
+  for target in (12, 35, 70, 150):
+    e = pick(target)
+    if e not in tenors:
+      tenors.append(e)
+  tenors.sort(key=lambda e: (dt.date.fromisoformat(e) - today).days)
+  if len(tenors) < 2:
+    return dict(symbol=symbol, spot=S, q=q, today=today, strikeATM=Katm,
+                shape="insufficient expiries", term=[], strategies=[])
+
+  # ATM leg (hence ATM IV) for each tenor -> the real term structure.
+  atm = {e: lq(e, Katm) for e in tenors}
+  term = [dict(expiry=e, t_days=atm[e]["t_days"], iv=atm[e]["iv"]) for e in tenors]
+  ivs = [atm[e]["iv"] for e in tenors]
+
+  # Shape: is the richest vol at the front, in an interior hump, or the back?
+  sellable = tenors[:-1]                       # never sell the longest (own it)
+  sell_e = max(sellable, key=lambda e: atm[e]["iv"])
+  long_e = tenors[-1]
+  hump_i = None
+  for i in range(1, len(tenors) - 1):
+    if ivs[i] > ivs[i - 1] + 0.01 and ivs[i] > ivs[i + 1] + 0.01:
+      if hump_i is None or ivs[i] > ivs[hump_i]:
+        hump_i = i
+  if hump_i is not None:
+    shape = f"a vol hump at {atm[tenors[hump_i]]['t_days']}d"
+  elif ivs[0] - ivs[-1] > 0.01:
+    shape = "backwardation (rich front, cheap back)"
+  elif ivs[-1] - ivs[0] > 0.01:
+    shape = "upward term structure (cheap front, rich back)"
+  else:
+    shape = "a roughly flat term structure"
+  seq = " -> ".join(f"{atm[e]['t_days']}d {atm[e]['iv']*100:.0f}%" for e in tenors)
+
+  def pct(e):
+    return f"{atm[e]['iv']*100:.0f}%"
+
   defs = []
 
-  la = lq(e_near, Katm); la["qty"] = 1
-  sa = lq(e_hump, Katm); sa["qty"] = -2
-  ma = lq(e_mid, Katm); ma["qty"] = 1
-  defs.append(("A) Call time butterfly (sell the Aug hump)",
-               "Long near + mid shoulders, short 2x the event-window tenor. "
-               "Sells the vol hump; near delta/vega-neutral, long gamma. "
-               "Wins if the hump flattens.", [la, sa, ma]))
+  # A) Primary vol sale: butterfly if there's an interior hump to short,
+  #    otherwise a calendar that sells the genuinely richest tenor.
+  if hump_i is not None:
+    lo, hi = tenors[hump_i - 1], tenors[hump_i + 1]
+    h = tenors[hump_i]
+    la = dict(atm[lo], qty=1); sa = dict(atm[h], qty=-2); ma = dict(atm[hi], qty=1)
+    defs.append((f"A) Term-vol butterfly — sell the {atm[h]['t_days']}d peak",
+                 f"Term structure shows {shape} ({seq}). Long the "
+                 f"{atm[lo]['t_days']}d/{atm[hi]['t_days']}d shoulders, short 2x "
+                 f"the {atm[h]['t_days']}d peak ({pct(h)}); near delta/vega-"
+                 "neutral, long gamma. Wins if the peak flattens.",
+                 [la, sa, ma]))
+  else:
+    s = dict(atm[sell_e], qty=-1); l = dict(atm[long_e], qty=1)
+    defs.append((f"A) Calendar — sell rich {atm[sell_e]['t_days']}d vol",
+                 f"Term structure shows {shape} ({seq}). Sell the richest tenor "
+                 f"({atm[sell_e]['t_days']}d @ {pct(sell_e)}) and own cheaper "
+                 f"long-dated vol ({atm[long_e]['t_days']}d @ {pct(long_e)}). "
+                 "Long back-vega, short front-gamma, positive carry.",
+                 [s, l]))
 
-  sb = lq(e_hump, Katm); sb["qty"] = -1
-  lb = lq(e_long, Katm); lb["qty"] = 1
-  defs.append(("B) ATM call calendar (sell Aug / buy long)",
-               "Sell rich event-window vol, own cheap long-dated vol. "
-               "Long back-vega, short front-gamma; harvests the backwardation.",
-               [sb, lb]))
+  # B) A second calendar at a different short tenor (distinct from A's short).
+  used_short = sell_e if hump_i is None else tenors[hump_i]
+  alt = [e for e in sellable if e != used_short]
+  if alt:
+    alt_e = max(alt, key=lambda e: atm[e]["iv"])
+    s = dict(atm[alt_e], qty=-1); l = dict(atm[long_e], qty=1)
+    defs.append((f"B) Calendar — sell {atm[alt_e]['t_days']}d vs {atm[long_e]['t_days']}d",
+                 f"Second calendar at the {atm[alt_e]['t_days']}d tenor "
+                 f"({pct(alt_e)}) against the {atm[long_e]['t_days']}d "
+                 f"({pct(long_e)}). Same long-vega / positive-carry idea at a "
+                 "different point on the curve.", [s, l]))
 
-  lc = lq(e_long, Katm); lc["qty"] = 1
-  sc = lq(e_hump, round(S * 1.08)); sc["qty"] = -1
-  defs.append(("C) Bullish call diagonal (long far / short near OTM hump)",
-               "Own a long-dated ATM call; sell a near OTM call into the rich "
-               "event-window vol to finance it. Net long delta + vega carry.",
-               [lc, sc]))
+  # C) Bullish diagonal: own long-dated ATM, sell a near OTM at the rich tenor.
+  lc = dict(atm[long_e], qty=1)
+  sc = lq(used_short, round(S * 1.08)); sc["qty"] = -1
+  defs.append((f"C) Bullish diagonal — long {atm[long_e]['t_days']}d / short {atm[used_short]['t_days']}d OTM",
+               f"Own a {atm[long_e]['t_days']}d ATM call; sell a "
+               f"{atm[used_short]['t_days']}d OTM call ({round(S*1.08)} strike, "
+               f"{sc['iv']*100:.0f}% IV) to finance it. Net long delta + vega "
+               "carry; bullish tilt.", [lc, sc]))
 
   strategies = []
   for name, thesis, legs in defs:
@@ -173,7 +232,7 @@ def analyze(symbol: str, ticker=None, spot=None, q=None):
         max_loss=round(float(np.min(pnl)), 4)))
 
   return dict(symbol=symbol, spot=S, q=q, today=today, strikeATM=Katm,
-              expiries=dict(near=e_near, hump=e_hump, mid=e_mid, long=e_long),
+              shape=shape, term=term, sell_expiry=sell_e, long_expiry=long_e,
               strategies=strategies)
 
 
@@ -212,10 +271,13 @@ def report_and_save(res):
   print("=" * 74)
   print(f"TERM-STRUCTURE TRADES  {res['symbol']}  spot=${S:.2f}  q={q:.3%}"
         f"  ATM~{res['strikeATM']}  ({res['today']})")
-  print(f"  expiries: near={res['expiries']['near']} "
-        f"hump={res['expiries']['hump']} mid={res['expiries']['mid']} "
-        f"long={res['expiries']['long']}")
+  print(f"  shape: {res.get('shape', 'n/a')}")
+  if res.get("term"):
+    print("  ATM term structure: "
+          + " -> ".join(f"{d['t_days']}d {d['iv']*100:.0f}%" for d in res["term"]))
   print("=" * 74)
+  if not res["strategies"]:
+    print("No strategies (insufficient distinct expiries)."); return
   for s in res["strategies"]:
     print(f"\n{s['name']}\n  {s['thesis']}")
     print(f"  {'leg':<7}{'exp':<12}{'d':>4} {'K':>6} {'mid':>7} {'IV%':>6} "
@@ -261,7 +323,8 @@ def _save_audit(res):
   manifest = dict(symbol=res["symbol"], generated_local=now.isoformat(timespec="seconds"),
                   data_source="Yahoo Finance option chain (yfinance)",
                   spot=round(res["spot"], 4), dividend_yield_q=res["q"],
-                  atm_strike=res["strikeATM"], expiries=res["expiries"],
+                  atm_strike=res["strikeATM"], term_structure_shape=res.get("shape"),
+                  atm_term_structure=res.get("term"),
                   assumptions=["mid=(bid+ask)/2", "greeks BSM at leg IV",
                                "payoff at earliest expiry; longer legs BSM, IV held",
                                "per share; contract x100; excl. commissions/slippage"],

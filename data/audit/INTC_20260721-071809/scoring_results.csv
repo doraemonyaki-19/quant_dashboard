@@ -1,4 +1,0 @@
-model,rmse_core,rmse_full,unpriced,n
-"Black-Scholes-Merton (European, q)",0.865349,0.865244,14,104
-CRR binomial (American),0.861773,0.849796,12,106
-Black-76 (forward),0.865349,0.865244,14,104

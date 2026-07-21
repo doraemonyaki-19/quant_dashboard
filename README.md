@@ -280,22 +280,28 @@ surface offline.
 ## Strategies tab — term-structure trades with payoff curves
 
 The dashboard has two tabs: **Analysis** (the surface / greeks / scoring above)
-and **Strategies**. The Strategies tab reads the vol term structure and proposes
-concrete trades that **sell the elevated near/event-window vol against the
-cheaper long-dated backwardation**, each priced from live mids (`strategies.py`):
+and **Strategies**. The Strategies tab is **data-driven and shape-adaptive**
+(`strategies.py`): it reads the ticker's own ATM vol term structure, classifies
+the shape, and builds trades that **sell the genuinely richest tenor** for that
+shape against cheaper long-dated vol — no hardcoded narrative. The classifier
+picks one of:
 
-- **A) Call time butterfly** — long near + mid shoulders, short 2× the event
-  tenor; near delta/vega-neutral, long gamma. Wins if the hump flattens.
-- **B) ATM call calendar** — sell the event tenor, own long-dated vol; long
-  back-vega, positive theta. Harvests the backwardation.
-- **C) Bullish call diagonal** — long far ATM, short near OTM; net long delta
-  financed by the rich event vol.
+- **Interior hump** (an intermediate tenor is a local max) → a **term-vol
+  butterfly** shorting the peak (e.g. SPCX: `10d 85% → 38d 94% → 59d 86%` →
+  short the 38d).
+- **Backwardation** (rich front, cheap back) → **calendars** shorting the rich
+  front (e.g. CVX: `10d 36% → 150d 27%` → sell the 36% front, own the 27% back).
+- **Upward / flat** → calendars/diagonal at the highest-IV sellable tenor.
 
-Each card shows the legs (strike/mid/IV/greeks), net premium + net greeks, and a
-**payoff curve** evaluated at the earliest leg expiry (longer legs revalued by
-BSM, IV held constant), with breakevens marked. Legs + summary are written to the
-run's audit bundle (`strategy_legs.csv`, `strategies.csv`). **Illustrative only —
-not investment advice**; SPCX spreads are wide, so price against real fills.
+Each ticker gets up to three structures (a butterfly-or-calendar, a second
+calendar at a different tenor, and a bullish diagonal). Every card shows the legs
+(strike/mid/IV/greeks), net premium + net greeks, and a **payoff curve**
+evaluated at the earliest leg expiry (longer legs revalued by BSM, IV held
+constant), with breakevens marked. The detected shape and real term structure are
+printed in the tab intro; legs + summary go to the run's audit bundle
+(`strategy_legs.csv`, `strategies.csv`, plus `term_structure_shape` in the
+manifest). **Illustrative only — not investment advice**; spreads can be wide, so
+price against real fills.
 
 ## Audit trail — every calculation is saved
 
@@ -304,11 +310,20 @@ the exact data used and the results to `data/audit/<SYMBOL>_<timestamp>/`:
 
 | File                    | Contents                                                                                                                                        |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `manifest.json`       | run metadata (symbol, spot, q, rate, expiries, featured expiry, reference-IV source) + the full scoring summary and verdict — machine-readable |
+| `manifest.json`       | run metadata (symbol, spot, q, rate, featured expiry, reference-IV source), the full scoring summary/verdict, an **`expiry_coverage`** block, and the strategy **`term_structure_shape`** — machine-readable |
 | `surface_points.csv`  | every OTM strike used, with the raw**`mid` (input) → `iv` (output)**                                                                 |
 | `term_structure.csv`  | per-expiry ATM IV, all five greeks, rate, forward                                                                                               |
 | `scoring_chain.csv`   | the**raw** featured-expiry chain (bid/ask/last/Yahoo-IV) fed to the model scoring                                                         |
 | `scoring_results.csv` | the per-model RMSE table                                                                                                                        |
+| `strategy_legs.csv` / `strategies.csv` | each strategy's legs (mid/IV/greeks) and net premium/greeks/breakevens |
+
+**Honest data coverage.** `manifest.json → expiry_coverage` records how many
+expiries were in the 12-month window vs how many produced a full-enough smile
+(`≥ min_smile_points` OTM strikes) to enter the term structure, and lists every
+dropped expiry with its reason (`thin_smile(n)` or `fetch_failed`). So a run on a
+thin-quote snapshot reports e.g. *"in_horizon: 12, with_full_smile: 3"* rather
+than silently implying the ticker has only 3 expiries — and the dashboard shows a
+**"Sparse data"** banner when coverage is poor.
 
 `data/audit/index.csv` is an append-only log — one row per run (timestamp,
 symbol, spot, q, featured expiry, reference IV, lowest-RMSE model, bundle path),

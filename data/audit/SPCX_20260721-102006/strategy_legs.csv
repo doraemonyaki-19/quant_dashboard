@@ -1,8 +1,0 @@
-strategy,qty,kind,expiration,t_days,strike,bid,ask,mid,iv,delta,gamma,theta,vega
-A) Call time butterfly (sell the Aug hump),1,C,2026-07-31,10,128.0,6.0,6.5,6.25,0.756529,0.51863,0.024942,-0.32542,0.08416
-A) Call time butterfly (sell the Aug hump),-2,C,2026-08-21,31,130.0,11.8,12.3,12.05,0.87161,0.52706,0.012281,-0.21457,0.14801
-A) Call time butterfly (sell the Aug hump),1,C,2026-09-18,59,130.0,15.6,16.0,15.8,0.807054,0.55018,0.00956,-0.14527,0.20303
-B) ATM call calendar (sell Aug / buy long),-1,C,2026-08-21,31,130.0,11.8,12.3,12.05,0.87161,0.52706,0.012281,-0.21457,0.14801
-B) ATM call calendar (sell Aug / buy long),1,C,2026-12-18,150,130.0,22.9,24.3,23.6,0.731459,0.59185,0.00649,-0.08356,0.31763
-C) Bullish call diagonal (long far / short near OTM hump),1,C,2026-12-18,150,130.0,22.9,24.3,23.6,0.731459,0.59185,0.00649,-0.08356,0.31763
-C) Bullish call diagonal (long far / short near OTM hump),-1,C,2026-08-21,31,140.0,8.4,8.8,8.6,0.887738,0.41482,0.011809,-0.21277,0.14495

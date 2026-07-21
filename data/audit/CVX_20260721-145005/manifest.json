@@ -1,0 +1,126 @@
+{
+  "symbol": "CVX",
+  "generated_local": "2026-07-21T14:50:05",
+  "data_source": "Yahoo Finance option chain (yfinance)",
+  "asof": "2026-07-21",
+  "spot": 190.05,
+  "dividend_yield_q": 0.03672717646891635,
+  "rate_used": 0.043,
+  "rate_note": "flat placeholder (rate_for); swap for a live Treasury curve",
+  "months": 12,
+  "expiry_coverage": {
+    "in_horizon": 12,
+    "with_full_smile": 3,
+    "dropped_thin_smile": 9,
+    "dropped_fetch_failed": 0,
+    "min_smile_points": 4,
+    "dropped": [
+      {
+        "expiry": "2026-07-24",
+        "reason": "thin_smile(1)"
+      },
+      {
+        "expiry": "2026-07-31",
+        "reason": "thin_smile(3)"
+      },
+      {
+        "expiry": "2026-08-07",
+        "reason": "thin_smile(1)"
+      },
+      {
+        "expiry": "2026-08-14",
+        "reason": "thin_smile(1)"
+      },
+      {
+        "expiry": "2026-08-21",
+        "reason": "thin_smile(1)"
+      },
+      {
+        "expiry": "2026-08-28",
+        "reason": "thin_smile(2)"
+      },
+      {
+        "expiry": "2026-09-18",
+        "reason": "thin_smile(3)"
+      },
+      {
+        "expiry": "2026-10-16",
+        "reason": "thin_smile(3)"
+      },
+      {
+        "expiry": "2026-12-18",
+        "reason": "thin_smile(3)"
+      }
+    ],
+    "note": "n_expiries counts only expiries with a full-enough smile (>= min_smile_points OTM strikes); the term structure uses these. Others were dropped (thin/stale quotes or fetch failure). The ticker may list many more expiries."
+  },
+  "n_expiries": 3,
+  "expiries": [
+    "2027-01-15",
+    "2027-03-19",
+    "2027-06-17"
+  ],
+  "featured_expiry": "2027-01-15",
+  "featured_t_days": 178,
+  "reference_iv_column": "yahoo_iv",
+  "reference_iv_source": "Yahoo (proxy)",
+  "core_moneyness_band": 0.25,
+  "scoring": {
+    "models": [
+      {
+        "model": "Black-Scholes-Merton (European, q)",
+        "rmse_core": 0.009736,
+        "rmse_full": 0.305249,
+        "unpriced": 1,
+        "n": 75
+      },
+      {
+        "model": "CRR binomial (American)",
+        "rmse_core": 0.011713,
+        "rmse_full": 0.293219,
+        "unpriced": 1,
+        "n": 75
+      },
+      {
+        "model": "Black-76 (forward)",
+        "rmse_core": 0.009736,
+        "rmse_full": 0.305249,
+        "unpriced": 1,
+        "n": 75
+      }
+    ],
+    "lowest_rmse_core_model": "Black-Scholes-Merton (European, q)",
+    "itm_put_iv_gap_bp": [
+      [
+        1.631,
+        790.4
+      ],
+      [
+        1.579,
+        749.3
+      ],
+      [
+        1.526,
+        614.1
+      ],
+      [
+        1.473,
+        567.2
+      ],
+      [
+        1.421,
+        161.1
+      ],
+      [
+        1.368,
+        345.7
+      ]
+    ]
+  },
+  "files": [
+    "surface_points.csv",
+    "term_structure.csv",
+    "scoring_chain.csv",
+    "scoring_results.csv"
+  ]
+}

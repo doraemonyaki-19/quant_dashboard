@@ -59,7 +59,7 @@ def compute_context(symbol: str, months: int = 12,
   t = yf.Ticker(symbol)
   try:
     q = div_yield(t, spot_price(t))
-    S, asof, rows_surface, per_expiry = collect(symbol, months, q, t)
+    S, asof, rows_surface, per_expiry, cov = collect(symbol, months, q, t)
   except Exception as e:
     raise ValueError(f"Could not load option data for '{symbol}' ({e}).")
   if not per_expiry:
@@ -90,6 +90,7 @@ def compute_context(symbol: str, months: int = 12,
 
   ivs = [d["atm_iv"] for d in per_expiry]
   ctx = dict(symbol=symbol, spot=S, asof=asof, q=q, months=months, strat=strat,
+             coverage=cov,
              n_exp=len(per_expiry), per_expiry=per_expiry, figs=figs,
              surf3d_html=surf3d_html, plotly_external=not embed_plotly,
              feat=feat, feat_rate=feat_rate, score=score,
@@ -138,6 +139,19 @@ def save_audit(ctx: dict) -> Path:
       "rate_used": ctx["feat_rate"],
       "rate_note": "flat placeholder (rate_for); swap for a live Treasury curve",
       "months": ctx["months"],
+      "expiry_coverage": {
+          "in_horizon": ctx["coverage"]["n_in_horizon"],
+          "with_full_smile": ctx["coverage"]["n_full_smile"],
+          "dropped_thin_smile": ctx["coverage"]["n_dropped_thin"],
+          "dropped_fetch_failed": ctx["coverage"]["n_dropped_fetch"],
+          "min_smile_points": ctx["coverage"]["min_smile_points"],
+          "dropped": [{"expiry": e, "reason": r}
+                      for e, r in ctx["coverage"]["dropped"]],
+          "note": ("n_expiries counts only expiries with a full-enough smile "
+                   "(>= min_smile_points OTM strikes); the term structure uses "
+                   "these. Others were dropped (thin/stale quotes or fetch "
+                   "failure). The ticker may list many more expiries."),
+      },
       "n_expiries": ctx["n_exp"],
       "expiries": [d["expiry"] for d in ctx["per_expiry"]],
       "featured_expiry": ctx["feat"]["expiry"],
@@ -291,7 +305,18 @@ def render_dashboard(ctx: dict) -> str:
   q_disp = "0.00" if ctx["q"] < 1e-4 else f"{ctx['q']*100:.2f}%"
   audit_rel = (Path(ctx["audit_dir"]).relative_to(ROOT).as_posix()
                if ctx.get("audit_dir") else "")
-  body = BODY.format(audit_rel=audit_rel,
+  cov = ctx.get("coverage", {})
+  coverage_banner = ""
+  if cov and cov["n_full_smile"] < 0.6 * max(cov["n_in_horizon"], 1):
+    coverage_banner = (
+        '<div class="flag" style="margin:6px 0 0">'
+        f'<b>Sparse data.</b> Only {cov["n_full_smile"]} of '
+        f'{cov["n_in_horizon"]} expiries in the 12-month window had a '
+        f'full-enough smile (&ge;{cov["min_smile_points"]} out-of-the-money '
+        'strikes); the rest were dropped for thin/stale quotes. The surface and '
+        'term structure below cover only those expiries &mdash; treat the shape '
+        'as partial, and prefer re-running during market hours.</div>')
+  body = BODY.format(audit_rel=audit_rel, coverage_banner=coverage_banner,
       symbol=sym, spot=f"{ctx['spot']:,.2f}", asof=ctx["asof"],
       q_disp=q_disp, pill_note=_pill_note(ctx["q"]),
       n_exp=ctx["n_exp"], months=ctx["months"],
@@ -335,14 +360,18 @@ def _strategy_panel(ctx: dict) -> str:
             'did not yield the expiries needed to build the term-structure '
             'trades.</p></div>')
   q_disp = "0" if strat["q"] < 1e-4 else f"{strat['q']*100:.2f}%"
+  term_seq = " → ".join(f"{d['t_days']}d {d['iv']*100:.0f}%"
+                        for d in strat.get("term", []))
+  shape = strat.get("shape", "the term structure")
   out = [
       f'<p class="strat-intro"><b>Term-structure trades for {strat["symbol"]}</b> '
       f'(spot ${strat["spot"]:,.2f}, q={q_disp}, ATM~{strat["strikeATM"]}). '
-      'Built from the vol term structure on the Analysis tab &mdash; selling the '
-      'elevated near/event-window vol against the cheaper long-dated '
-      'backwardation. Priced from live mids; payoff is evaluated at the '
-      '<b>earliest leg expiry</b>, longer legs revalued by BSM with IV held '
-      'constant. Per share (contract &times;100).</p>']
+      f'This ticker&rsquo;s ATM term structure shows <b>{shape}</b> '
+      f'(<span class="mono">{term_seq}</span>). The trades below sell the '
+      'genuinely richest tenor for this shape against cheaper long-dated vol. '
+      'Priced from live mids; payoff is evaluated at the <b>earliest leg '
+      'expiry</b>, longer legs revalued by BSM with IV held constant. Per share '
+      '(contract &times;100).</p>']
 
   for s in strat["strategies"]:
     legs = "".join(
@@ -764,6 +793,7 @@ BODY = r"""
     <div class="kpi"><div class="val">{feat_iv}<span class="u">%</span></div><div class="lab eyebrow">{feat_date} ATM IV</div></div>
     <div class="kpi"><div class="val">{iv_hi}&ndash;{iv_lo}<span class="u">%</span></div><div class="lab eyebrow">ATM IV term range</div></div>
   </section>
+  {coverage_banner}
 
   <section class="grid">
     <div class="card">

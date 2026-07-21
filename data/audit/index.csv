@@ -1,13 +1,2 @@
 run_local,symbol,spot,q,months,n_expiries,featured_expiry,ref_iv,lowest_rmse_model,dir
-2026-07-20T21:46:21,SPCX,119.85,0.0,12,10,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260720-214621
-2026-07-20T22:00:34,SPY,742.09,0.010140279113959292,12,26,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPY_20260720-220034
-2026-07-20T22:04:03,SPCX,119.85,0.0,12,10,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260720-220403
-2026-07-20T22:10:39,TSLA,369.57,0.0,12,15,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/TSLA_20260720-221039
-2026-07-21T07:18:09,INTC,97.06,0.0,12,17,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/INTC_20260721-071809
-2026-07-21T10:14:47,SPCX,126.455,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-101447
-2026-07-21T10:18:36,SPCX,126.9595,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-101836
-2026-07-21T10:20:06,SPCX,127.595,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-102006
-2026-07-21T10:21:56,SPCX,126.84,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-102156
-2026-07-21T10:23:31,SPCX,127.02,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-102331
-2026-07-21T10:24:04,SPCX,127.005,0.0,12,14,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-102404
-2026-07-21T13:39:23,NVDA,206.71,0.0013545546461501622,12,8,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/NVDA_20260721-133923
+2026-07-21T14:50:05,CVX,190.05,0.03672717646891635,12,3,2027-01-15,yahoo_iv,"Black-Scholes-Merton (European, q)",data/audit/CVX_20260721-145005

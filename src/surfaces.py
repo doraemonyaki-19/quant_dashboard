@@ -103,25 +103,37 @@ def option_mid(row):
 
 
 def collect(symbol: str, months: int, q: float = 0.0, ticker: yf.Ticker = None):
-  """Return spot, asof, dividend q, and per-expiry dicts with smile + ATM greeks."""
+  """Collect the surface + per-expiry ATM data.
+
+  Returns (S, asof, rows_surface, per_expiry, stats). `stats` makes the run's
+  data coverage honest: how many expiries were within the horizon, how many
+  produced a full-enough smile (>=4 OTM points) to enter the term structure,
+  and which were dropped (thin smile or fetch failure). This is why
+  `len(per_expiry)` can be far smaller than the ticker's true expiry count.
+  """
+  MIN_SMILE = 4                      # OTM points needed for a term-structure row
   t = ticker or yf.Ticker(symbol)
   S = spot_price(t)
   asof = dt.date.today()
   horizon = asof + dt.timedelta(days=int(months * 30.44))
   rows_surface = []  # flat records for CSV
   per_expiry = []
+  n_in_horizon = 0
+  dropped = []       # (expiry, reason)
 
   for exp in t.options:
     ed = dt.date.fromisoformat(exp)
     T_days = (ed - asof).days
     if T_days <= 0 or ed > horizon:
       continue
+    n_in_horizon += 1
     T = T_days / 365.0
     r = rate_for(T)
     F = S * math.exp((r - q) * T)
     try:
       ch = t.option_chain(exp)
     except Exception:
+      dropped.append((exp, "fetch_failed"))
       continue
 
     smile = []  # (moneyness, iv)
@@ -146,7 +158,8 @@ def collect(symbol: str, months: int, q: float = 0.0, ticker: yf.Ticker = None):
                                    moneyness=round(mny, 4),
                                    side="call" if is_call else "put",
                                    mid=round(mid, 4), iv=round(iv, 6)))
-    if len(smile) < 4:
+    if len(smile) < MIN_SMILE:
+      dropped.append((exp, f"thin_smile({len(smile)})"))
       continue
     smile.sort()
 
@@ -164,7 +177,13 @@ def collect(symbol: str, months: int, q: float = 0.0, ticker: yf.Ticker = None):
         delta=g.delta, gamma=g.gamma, theta=g.theta, vega=g.vega, rho=g.rho))
 
   per_expiry.sort(key=lambda d: d["T_days"])
-  return S, asof, rows_surface, per_expiry
+  stats = dict(
+      n_in_horizon=n_in_horizon,
+      n_full_smile=len(per_expiry),
+      n_dropped_thin=sum(1 for _, r in dropped if r.startswith("thin")),
+      n_dropped_fetch=sum(1 for _, r in dropped if r == "fetch_failed"),
+      dropped=dropped, min_smile_points=MIN_SMILE)
+  return S, asof, rows_surface, per_expiry, stats
 
 
 # --------------------------------------------------------------------------- #
@@ -410,12 +429,18 @@ def main(argv=None):
   t = yf.Ticker(args.symbol)
   S0 = spot_price(t)
   q = div_yield(t, S0)
-  S, asof, rows_surface, per_expiry = collect(args.symbol, args.months, q, t)
+  S, asof, rows_surface, per_expiry, stats = collect(args.symbol, args.months, q, t)
   if not per_expiry:
     raise SystemExit("no expirations collected")
   print(f"{args.symbol}  spot={S:.4f}  asof={asof}  q={q:.4f}  "
-        f"expiries<= {args.months}m: {len(per_expiry)}  "
+        f"expiries in horizon: {stats['n_in_horizon']}  "
+        f"full-smile: {stats['n_full_smile']}  "
+        f"(dropped thin={stats['n_dropped_thin']}, fetch={stats['n_dropped_fetch']})  "
         f"surface points: {len(rows_surface)}")
+  if stats["n_full_smile"] < 0.6 * stats["n_in_horizon"]:
+    print(f"  WARNING: only {stats['n_full_smile']}/{stats['n_in_horizon']} "
+          "expiries had a full smile -- term structure may be sparse "
+          "(thin/stale quotes).")
 
   s_csv, p_csv = write_csvs(rows_surface, per_expiry, data_dir)
   _save(fig_surface(per_expiry, args.symbol), fig_dir / "vol_surface_heatmap.png")

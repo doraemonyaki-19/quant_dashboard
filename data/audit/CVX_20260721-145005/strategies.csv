@@ -1,0 +1,4 @@
+strategy,net_premium,type,net_delta,net_gamma,net_theta,net_vega,breakevens,max_profit,max_loss,horizon
+A) Calendar — sell rich 10d vol,8.9,debit,0.0192,-0.02428,0.1779,0.3509,181.72|199.67,3.9547,-10.8424,2026-07-31
+B) Calendar — sell 38d vs 150d,6.475,debit,0.0133,-0.01151,0.0465,0.2328,178.79|203.12,5.0366,-8.031,2026-08-28
+C) Bullish diagonal — long 150d / short 10d OTM,12.79,debit,0.427,-0.00458,0.0599,0.4185,189.83,9.2971,-12.79,2026-07-31
