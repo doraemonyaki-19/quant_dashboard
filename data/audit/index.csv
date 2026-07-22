@@ -1,2 +1,5 @@
 run_local,symbol,spot,q,months,n_expiries,featured_expiry,ref_iv,lowest_rmse_model,dir
-2026-07-21T14:50:05,CVX,190.05,0.03672717646891635,12,3,2027-01-15,yahoo_iv,"Black-Scholes-Merton (European, q)",data/audit/CVX_20260721-145005
+2026-07-21T19:50:43,SPCX,123.54,0.0,12,13,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-195043
+2026-07-21T20:00:32,SPCX,123.54,0.0,12,13,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-200032
+2026-07-21T20:03:50,SPCX,123.54,0.0,12,13,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/SPCX_20260721-200350
+2026-07-22T10:12:26,TSLA,377.49,0.0,12,15,2026-12-18,yahoo_iv,CRR binomial (American),data/audit/TSLA_20260722-101226

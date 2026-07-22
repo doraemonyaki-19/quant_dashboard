@@ -26,7 +26,8 @@ from determine_model import score_rows                        # noqa: E402
 from surfaces import (collect, div_yield, rate_for, spot_price,  # noqa: E402
                       fig_surface, fig_greeks, fig_params, _b64,
                       plotly_surface_html)
-from strategies import analyze, fig_payoff, write_strategy_csvs  # noqa: E402
+from strategies import (analyze, fig_payoff, write_strategy_csvs,  # noqa: E402
+                        strategy_leg_row)
 from fetch_chain import chain_rows                             # noqa: E402
 
 
@@ -85,6 +86,7 @@ def compute_context(symbol: str, months: int = 12,
     strat = analyze(symbol, ticker=t, spot=S, q=q)
     for s in strat["strategies"]:
       s["payoff_png"] = _b64(fig_payoff(s, S))
+      s["payoff_png_put"] = _b64(fig_payoff(s, S, variant="put"))
   except Exception as e:
     sys.stderr.write(f"[strategies] warning: {e}\n")
 
@@ -211,20 +213,28 @@ def save_audit(ctx: dict) -> Path:
   if ctx.get("strat"):
     leg_rows, strat_rows = [], []
     for s in ctx["strat"]["strategies"]:
-      for L in s["legs"]:
-        leg_rows.append(dict(strategy=s["name"], qty=L["qty"], kind=L["kind"],
-                             expiration=L["expiration"], t_days=L["t_days"],
-                             strike=L["strike"], bid=L["bid"], ask=L["ask"],
-                             mid=round(L["mid"], 4), iv=round(L["iv"], 6),
-                             delta=round(L["delta"], 5), gamma=round(L["gamma"], 6),
-                             theta=round(L["theta"], 5), vega=round(L["vega"], 5)))
-      g = s["net"]
+      for variant, legs in (("call", s["legs"]), ("put", s["legs_put"])):
+        for L in legs:
+          leg_rows.append(strategy_leg_row(s["name"], variant, L))
+      g, gp = s["net"], s["net_put"]
       strat_rows.append(dict(strategy=s["name"], net_premium=round(s["premium"], 4),
                              type=s["ptype"], net_delta=round(g["delta"], 4),
                              net_gamma=round(g["gamma"], 5), net_theta=round(g["theta"], 4),
                              net_vega=round(g["vega"], 4),
+                             requires=s["requires"], put_requires=s["requires_put"],
+                             hedge_shares=s["hedge_shares"],
                              breakevens="|".join(map(str, s["breakevens"])),
                              max_profit=s["max_profit"], max_loss=s["max_loss"],
+                             breakevens_hedged="|".join(map(str, s["breakevens_hedged"])),
+                             max_profit_hedged=s["max_profit_hedged"],
+                             max_loss_hedged=s["max_loss_hedged"],
+                             put_net_premium=round(s["premium_put"], 4),
+                             put_type=s["ptype_put"], put_net_delta=round(gp["delta"], 4),
+                             put_net_vega=round(gp["vega"], 4),
+                             put_hedge_shares=s["hedge_shares_put"],
+                             put_breakevens="|".join(map(str, s["breakevens_put"])),
+                             put_max_profit=s["max_profit_put"],
+                             put_max_loss=s["max_loss_put"],
                              horizon=s["horizon_exp"]))
     write_strategy_csvs(base, leg_rows, strat_rows)
 
@@ -351,6 +361,60 @@ def render_dashboard(ctx: dict) -> str:
   return _shell(searchbar_html(sym), tabbed)
 
 
+def _hedge_howto(strat: dict) -> str:
+  """A concrete how-to for delta-hedging, worked with the first trade's numbers."""
+  S = strat["spot"]
+  ex = None
+  for s in strat["strategies"]:
+    if abs(s["hedge_shares"]) > 1e-9:
+      ex = s
+      break
+  if ex is None:
+    return ""
+  hs = ex["hedge_shares"]
+  # Per one listed contract (x100 shares); a desk trades N contracts.
+  sh_ctr = hs * 100
+  side = "buy" if hs > 0 else "sell (short)"
+  opp = "sold" if hs > 0 else "bought"
+  worked = (
+      f'<b>Worked example &mdash; &ldquo;{ex["name"].split("—")[0].strip()}&rdquo;.</b> '
+      f'Its net delta is {ex["net"]["delta"]:+.3f}/share, so hedge&nbsp;=&nbsp;'
+      f'&minus;({ex["net"]["delta"]:+.3f}) = {hs:+.3f} shares per option unit. '
+      f'For <b>one contract</b> (&times;100) you {side} '
+      f'<b>{abs(sh_ctr):.0f} shares</b> of {strat["symbol"]} at the ${S:,.2f} spot; '
+      f'for 10 contracts, {abs(sh_ctr)*10:.0f} shares. Because the options were net '
+      f'{"long" if hs < 0 else "short"} delta, the hedge is the {opp} stock that '
+      f'offsets it &mdash; leaving a position whose P&amp;L comes from vol and time, '
+      f'not from which way {strat["symbol"]} drifts.')
+  return (
+      '<div class="strat-howto">'
+      '<h3>How to delta-hedge these trades</h3>'
+      '<p>Each structure below carries a small residual <b>net delta</b> (its '
+      'directional exposure &mdash; dollars of P&amp;L per $1 move in the '
+      'underlying). Delta-hedging cancels that so the trade is a clean bet on '
+      '<b>vol / term structure</b>, which is the actual thesis. The dashed line on '
+      'every payoff plot is this hedged P&amp;L.</p>'
+      '<ol>'
+      '<li><b>Read the net delta</b> from the card&rsquo;s &Delta; chip (per '
+      'share, for one option unit).</li>'
+      '<li><b>Trade the opposite in stock.</b> Hold <b>&minus;net&Delta; shares '
+      'per option unit</b> &mdash; i.e. <b>&minus;net&Delta;&times;100 shares per '
+      'contract</b>. Positive net delta &rArr; short that many shares; negative '
+      '&rArr; buy them. This zeroes total delta at the current spot.</li>'
+      '<li><b>Hold, then re-hedge as spot moves.</b> The hedge is exact only at '
+      'today&rsquo;s price; <b>gamma</b> makes delta drift as the underlying moves '
+      '(the dashed curve still bends away from flat). A desk re-hedges back to '
+      'neutral periodically &mdash; the profit/loss of that rehedging <em>is</em> '
+      'the long/short-gamma P&amp;L. The dashed curve here assumes a <b>static</b> '
+      'hedge set once and held to the horizon.</li>'
+      '<li><b>Watch the costs.</b> Each re-hedge crosses the stock bid/ask and '
+      'pays financing on the shares (and borrow, if short). Frequent rehedging of '
+      'a low-gamma position can eat the edge.</li>'
+      '</ol>'
+      f'<p>{worked}</p>'
+      '</div>')
+
+
 def _strategy_panel(ctx: dict) -> str:
   """Strategies tab: term-structure trade cards with payoff curves."""
   strat = ctx.get("strat")
@@ -370,40 +434,108 @@ def _strategy_panel(ctx: dict) -> str:
       f'(<span class="mono">{term_seq}</span>). The trades below sell the '
       'genuinely richest tenor for this shape against cheaper long-dated vol. '
       'Priced from live mids; payoff is evaluated at the <b>earliest leg '
-      'expiry</b>, longer legs revalued by BSM with IV held constant. Per share '
-      '(contract &times;100).</p>']
+      'expiry</b>, longer legs revalued by BSM with IV held constant. Each payoff '
+      'plot also shows a <b>delta-hedged</b> curve (dashed): a static stock '
+      'position of &minus;net&Delta; shares/unit set at inception and held to '
+      'horizon, which zeroes directional exposure at spot and isolates the '
+      'vol/gamma edge. Per share (contract &times;100).</p>']
 
-  for s in strat["strategies"]:
-    legs = "".join(
+  out.append(_hedge_howto(strat))
+
+  out.append(
+      '<div class="strat-filter" role="group" aria-label="account permission filter">'
+      '<span class="sf-label">My account can trade:</span>'
+      '<button type="button" class="sf-btn active" data-strat-filter="naked">'
+      'Naked shorts &amp; spreads</button>'
+      '<button type="button" class="sf-btn" data-strat-filter="spread">'
+      'Spreads only (no naked)</button>'
+      '<button type="button" class="sf-btn" data-strat-filter="long">'
+      'Long options only</button>'
+      '<span class="sf-hint" id="strat-count"></span></div>'
+      '<div id="strat-empty" class="flag" style="display:none">No trade here fits '
+      'that permission level. These are all short-vol / term-structure harvests, '
+      'so every one sells a leg &mdash; a strictly long-only account can&rsquo;t '
+      'run them as constructed.</div>')
+
+  req_badge = {
+      "spread": ('req-spread', 'Spread', 'Defined-risk: every short leg is covered '
+                 'by a long option. Tradeable with spread approval, no naked short.'),
+      "naked": ('req-naked', 'Naked short', 'Contains an uncovered short leg &mdash; '
+                'needs uncovered/naked-option approval.'),
+      "long": ('req-long', 'Long only', 'No short legs.')}
+
+  def leg_rows_html(legs):
+    return "".join(
         f'<tr><td>{"+" if L["qty"]>0 else ""}{L["qty"]}{L["kind"]}</td>'
         f'<td>{L["expiration"]}</td><td>{L["t_days"]}</td>'
         f'<td>{L["strike"]:.0f}</td><td>{L["mid"]:.2f}</td>'
         f'<td>{L["iv"]*100:.1f}</td><td>{L["delta"]:.3f}</td>'
         f'<td>{L["theta"]:.3f}</td><td>{L["vega"]:.3f}</td></tr>'
-        for L in s["legs"])
+        for L in legs)
+
+  head = ('<thead><tr><th>Leg</th><th>Expiry</th><th>d</th><th>K</th><th>Mid</th>'
+          '<th>IV%</th><th>&Delta;</th><th>&Theta;/d</th><th>Vega</th></tr></thead>')
+
+  for s in strat["strategies"]:
+    legs = leg_rows_html(s["legs"])
+    legs_put = leg_rows_html(s["legs_put"])
+    gp, hsp = s["net_put"], s["hedge_shares_put"]
     g = s["net"]
     prem_chip = (f'<span class="chip {s["ptype"]}">'
                  f'{s["ptype"]} ${abs(s["premium"]):.2f}/sh'
                  f' (${abs(s["premium"])*100:.0f})</span>')
+    hs = s["hedge_shares"]
+    hedge_chip = (f'<span class="chip">hedge {"+" if hs > 0 else ""}{hs:.2f} sh'
+                  f' ({abs(hs)*100:.0f}/contract)</span>')
     chips = (prem_chip
              + f'<span class="chip">Δ {g["delta"]:+.3f}</span>'
              + f'<span class="chip">Γ {g["gamma"]:+.4f}</span>'
              + f'<span class="chip">Θ {g["theta"]:+.3f}/d</span>'
-             + f'<span class="chip">vega {g["vega"]:+.3f}</span>')
+             + f'<span class="chip">vega {g["vega"]:+.3f}</span>'
+             + hedge_chip)
     be = (", ".join(f"${b:g}" for b in s["breakevens"])
           if s["breakevens"] else "none in range")
+    be_h = (", ".join(f"${b:g}" for b in s["breakevens_hedged"])
+            if s["breakevens_hedged"] else "none in range")
+    be_p = (", ".join(f"${b:g}" for b in s["breakevens_put"])
+            if s["breakevens_put"] else "none in range")
+    be_ph = (", ".join(f"${b:g}" for b in s["breakevens_hedged_put"])
+             if s["breakevens_hedged_put"] else "none in range")
+    rq_cls, rq_lbl, rq_tip = req_badge.get(s["requires"], req_badge["naked"])
     out.append(
-        '<div class="strat">'
-        f'<div class="strat-hd"><h3>{s["name"]}</h3>'
+        f'<div class="strat" data-requires="{s["requires"]}">'
+        f'<div class="strat-hd"><h3>{s["name"]}'
+        f'<span class="req {rq_cls}" title="{rq_tip}">{rq_lbl}</span></h3>'
         f'<div class="th">{s["thesis"]}</div></div>'
         '<div class="strat-body">'
         '<div class="strat-legs"><div class="tablewrap"><table>'
-        '<thead><tr><th>Leg</th><th>Expiry</th><th>d</th><th>K</th><th>Mid</th>'
-        '<th>IV%</th><th>&Delta;</th><th>&Theta;/d</th><th>Vega</th></tr></thead>'
-        f'<tbody>{legs}</tbody></table></div>'
+        f'{head}<tbody>{legs}</tbody></table></div>'
         f'<div class="chips">{chips}</div>'
         f'<div class="strat-be">Breakevens @ {s["horizon_exp"]}: {be} '
         f'&middot; max +${s["max_profit"]:.2f} / min ${s["max_loss"]:.2f} per sh</div>'
+        f'<div class="strat-be">Delta-hedged ({"+" if hs > 0 else ""}{hs:.2f} sh/unit, '
+        f'static): BE {be_h} &middot; max +${s["max_profit_hedged"]:.2f} / '
+        f'min ${s["max_loss_hedged"]:.2f} per sh</div>'
+        '<details class="strat-alt"><summary>Put-equivalent structure (same '
+        'strikes &mdash; trade whichever fills better)</summary>'
+        '<div class="tablewrap"><table>'
+        f'{head}<tbody>{legs_put}</tbody></table></div>'
+        f'<div class="strat-be">NET {s["ptype_put"]} '
+        f'${abs(s["premium_put"]):.2f}/sh &middot; &Delta; {gp["delta"]:+.3f} '
+        f'&middot; vega {gp["vega"]:+.3f} &middot; hedge '
+        f'{"+" if hsp > 0 else ""}{hsp:.2f} sh/unit</div>'
+        f'<div class="strat-be">Breakevens @ {s["horizon_exp"]}: {be_p} '
+        f'&middot; max +${s["max_profit_put"]:.2f} / '
+        f'min ${s["max_loss_put"]:.2f} per sh &middot; hedged BE {be_ph}</div>'
+        f'<div class="strat-plot"><img src="{s["payoff_png_put"]}" '
+        f'alt="put-equivalent payoff curve for {s["name"]}"></div>'
+        f'<div class="strat-be">Put version requires: '
+        f'<span class="req {req_badge.get(s["requires_put"], req_badge["naked"])[0]}">'
+        f'{req_badge.get(s["requires_put"], req_badge["naked"])[1]}</span>'
+        f'{" &mdash; same as the call version" if s["requires_put"] == s["requires"] else " &mdash; differs from the call version (strike coverage flips for puts)"}'
+        '. Put-call parity keeps the vol trade &amp; payoff shape ~identical; '
+        'premium, delta &amp; assignment differ.</div>'
+        '</details>'
         '</div>'
         f'<div class="strat-plot"><img src="{s["payoff_png"]}" '
         f'alt="payoff curve for {s["name"]}"></div>'
@@ -565,6 +697,14 @@ STYLE = r"""<style>
 
   /* strategy cards */
   .strat-intro { color:var(--muted); font-size:13.5px; max-width:74ch; margin:0 0 18px; }
+  .strat-howto { background:var(--surface); border:1px solid var(--line);
+    border-left:3px solid var(--accent); border-radius:12px; box-shadow:var(--shadow);
+    padding:16px 20px; margin:0 0 22px; max-width:82ch; }
+  .strat-howto h3 { margin:0 0 8px; font-size:15px; font-weight:800; letter-spacing:-.01em; }
+  .strat-howto p { color:var(--muted); font-size:13px; margin:8px 0; }
+  .strat-howto ol { color:var(--muted); font-size:13px; margin:8px 0 8px; padding-left:20px; }
+  .strat-howto li { margin:5px 0; }
+  .strat-howto b { color:var(--ink); }
   .strat { background:var(--surface); border:1px solid var(--line); border-radius:12px;
     box-shadow:var(--shadow); margin-bottom:18px; overflow:hidden; }
   .strat-hd { padding:16px 18px 6px; }
@@ -581,6 +721,27 @@ STYLE = r"""<style>
     padding:6px; overflow-x:auto; }
   .strat-plot img { display:block; width:100%; height:auto; }
   .strat-be { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:8px; }
+  .req { font-family:var(--mono); font-size:10.5px; font-weight:700; letter-spacing:.04em;
+    text-transform:uppercase; border-radius:6px; padding:2px 7px; margin-left:10px;
+    vertical-align:middle; border:1px solid transparent; white-space:nowrap; }
+  .req-spread { color:var(--good); background:color-mix(in srgb, var(--good) 12%, transparent);
+    border-color:color-mix(in srgb, var(--good) 35%, transparent); }
+  .req-naked { color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);
+    border-color:color-mix(in srgb, var(--warn) 35%, transparent); }
+  .req-long { color:var(--muted); background:var(--surface-2); border-color:var(--line); }
+  .strat-filter { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+    margin:0 0 18px; }
+  .sf-label { font-size:12.5px; color:var(--muted); font-weight:600; margin-right:2px; }
+  .sf-btn { font-family:var(--mono); font-size:11.5px; font-weight:700; cursor:pointer;
+    color:var(--muted); background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; padding:6px 11px; }
+  .sf-btn:hover { color:var(--ink); border-color:var(--accent); }
+  .sf-btn.active { color:#fff; background:var(--accent); border-color:var(--accent); }
+  .sf-hint { font-size:12px; color:var(--faint); font-family:var(--mono); margin-left:2px; }
+  .strat-alt { margin-top:10px; border-top:1px dashed var(--line); padding-top:8px; }
+  .strat-alt summary { cursor:pointer; font-size:12px; font-weight:700; color:var(--accent); }
+  .strat-alt summary:hover { filter:brightness(1.1); }
+  .strat-alt .tablewrap { margin-top:8px; }
   @media (max-width:760px) { .strat-body { grid-template-columns:1fr; } }
 
   header.top { display:flex; flex-wrap:wrap; gap:18px 24px; align-items:flex-end;
@@ -759,6 +920,34 @@ TABS_JS = r"""
       window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
     });
   });
+})();
+(function () {
+  var btns = document.querySelectorAll("[data-strat-filter]");
+  if (!btns.length) return;
+  var cards = document.querySelectorAll(".strat[data-requires]");
+  var empty = document.getElementById("strat-empty");
+  var count = document.getElementById("strat-count");
+  // level -> set of card requirements it may trade
+  var allow = { naked: ["spread", "naked", "long"], spread: ["spread", "long"],
+                long: ["long"] };
+  function apply(level) {
+    var ok = allow[level] || allow.naked, shown = 0;
+    cards.forEach(function (c) {
+      var vis = ok.indexOf(c.dataset.requires) !== -1;
+      c.style.display = vis ? "" : "none";
+      if (vis) shown++;
+    });
+    if (empty) empty.style.display = shown ? "none" : "";
+    if (count) count.textContent = shown + " of " + cards.length + " shown";
+  }
+  btns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      btns.forEach(function (x) { x.classList.remove("active"); });
+      b.classList.add("active");
+      apply(b.dataset.stratFilter);
+    });
+  });
+  apply("naked");
 })();
 </script>"""
 

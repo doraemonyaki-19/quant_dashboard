@@ -163,20 +163,29 @@ def crr_price(o: OptionInputs, steps: int = 400) -> float:
   p = (math.exp((r - q) * dt) - d) / (u - d)
   p = min(max(p, 0.0), 1.0)  # guard against tiny numerical drift
 
+  # Precompute S*u^j and d^k once (O(steps)) so the O(steps^2) backward pass
+  # never calls pow(): asset price at node (i, j) is upow[j]*dpow[i-j], which is
+  # bit-identical to S*(u**j)*(d**(i-j)) but hoists the exponentiation out.
+  is_call = o.is_call
+  upow = [S * (u ** j) for j in range(steps + 1)]
+  dpow = [d ** k for k in range(steps + 1)]
+  pm = 1.0 - p  # precompute once; the discount stays factored out so the
+
+  # arithmetic is bit-identical to disc*(p*v_up + (1-p)*v_dn) below.
   # terminal payoffs
-  values = []
+  values = [0.0] * (steps + 1)
   for j in range(steps + 1):
-    ST = S * (u ** j) * (d ** (steps - j))
-    payoff = (ST - K) if o.is_call else (K - ST)
-    values.append(max(payoff, 0.0))
+    ST = upow[j] * dpow[steps - j]
+    payoff = (ST - K) if is_call else (K - ST)
+    values[j] = payoff if payoff > 0.0 else 0.0
 
   # backward induction with early exercise
   for i in range(steps - 1, -1, -1):
     for j in range(i + 1):
-      cont = disc * (p * values[j + 1] + (1.0 - p) * values[j])
-      ST = S * (u ** j) * (d ** (i - j))
-      exercise = (ST - K) if o.is_call else (K - ST)
-      values[j] = max(cont, exercise)
+      cont = disc * (p * values[j + 1] + pm * values[j])
+      ST = upow[j] * dpow[i - j]
+      exercise = (ST - K) if is_call else (K - ST)
+      values[j] = cont if cont > exercise else exercise
   return values[0]
 
 

@@ -74,6 +74,42 @@ def leg_quote(t, expiration, strike, is_call, S, q, today, cache=None):
               vega=g.vega if g else float("nan"))
 
 
+def option_requirement(legs):
+  """Minimum options-approval level to place a structure, from its legs alone.
+
+  Returns (level, reason). 'spread' = every short contract is covered by a long
+  option of the same type held at least as long and at a no-worse strike (calls:
+  long strike <= short; puts: long strike >= short) -> defined risk, tradeable
+  without uncovered-option approval. 'naked' = some short leg is uncovered ->
+  needs uncovered/naked approval. 'long' = no short legs at all. Stock is not
+  considered (these structures are option-only)."""
+  def covers(lo, sh):
+    if lo["is_call"] != sh["is_call"]:
+      return False
+    if lo["T"] < sh["T"] - 1e-9:          # long must outlive the short
+      return False
+    return (lo["strike"] <= sh["strike"] + 1e-9 if sh["is_call"]
+            else lo["strike"] >= sh["strike"] - 1e-9)
+
+  longs, shorts = [], []
+  for L in legs:
+    n = int(round(abs(L["qty"])))
+    if L["qty"] > 0:
+      longs += [L] * n
+    elif L["qty"] < 0:
+      shorts += [L] * n
+  if not shorts:
+    return ("long", "no short legs")
+  used = [False] * len(longs)
+  for sh in shorts:                        # greedy match each short to a cover
+    hit = next((i for i, lo in enumerate(longs)
+                if not used[i] and covers(lo, sh)), None)
+    if hit is None:
+      return ("naked", "a short leg is not covered by a long option (uncovered)")
+    used[hit] = True
+  return ("spread", "every short leg is covered by a long option (defined risk)")
+
+
 def net_greeks(legs):
   agg = dict(premium=0.0, delta=0.0, gamma=0.0, theta=0.0, vega=0.0)
   for L in legs:
@@ -136,6 +172,12 @@ def analyze(symbol: str, ticker=None, spot=None, q=None):
 
   def lq(exp, k, call=True):
     return leg_quote(t, exp, k, call, S, q, today, cache)
+
+  def put_equiv(L):
+    """The same leg (strike/expiry/qty) expressed as a put instead of a call."""
+    p = leg_quote(t, L["expiration"], L["strike"], False, S, q, today, cache)
+    p["qty"] = L["qty"]
+    return p
 
   # Distinct tenors across the front-to-mid-to-long span, deduped by expiry.
   tenors = []
@@ -223,13 +265,46 @@ def analyze(symbol: str, ticker=None, spot=None, q=None):
   for name, thesis, legs in defs:
     g = net_greeks(legs)
     grid, pnl, h_days, h_exp = strategy_payoff(legs, g["premium"], S, q)
+    # Static delta hedge: hold `hedge_shares` of the underlying (per option unit)
+    # to zero net delta at inception, held to horizon (NOT rehedged). Stock P&L
+    # over the horizon is hedge_shares*(S_x - S); adding it isolates the vol/
+    # term-structure edge from directional drift and reveals the gamma curvature.
+    hedge_shares = -g["delta"]
+    pnl_h = pnl + hedge_shares * (grid - S)
+    # Put-equivalent legs: same strikes/expiries/signs, puts instead of calls.
+    # By put-call parity the structure's vega/gamma/theta and payoff shape are
+    # nearly identical; premium, net delta and assignment/margin differ, so it's
+    # offered so you can trade whichever side fills better.
+    legs_put = [put_equiv(L) for L in legs]
+    gp = net_greeks(legs_put)
+    req_lvl, req_reason = option_requirement(legs)
+    reqp_lvl, reqp_reason = option_requirement(legs_put)
+    grid_p, pnl_p, _, _ = strategy_payoff(legs_put, gp["premium"], S, q)
+    hedge_shares_put = -gp["delta"]
+    pnl_ph = pnl_p + hedge_shares_put * (grid_p - S)
     strategies.append(dict(
         name=name, thesis=thesis, legs=legs, net=g,
         premium=g["premium"], ptype="debit" if g["premium"] > 0 else "credit",
         breakevens=breakevens_from(grid, pnl), horizon_days=h_days,
         horizon_exp=h_exp, grid=grid, pnl=pnl,
         max_profit=round(float(np.max(pnl)), 4),
-        max_loss=round(float(np.min(pnl)), 4)))
+        max_loss=round(float(np.min(pnl)), 4),
+        hedge_shares=round(float(hedge_shares), 4), pnl_hedged=pnl_h,
+        breakevens_hedged=breakevens_from(grid, pnl_h),
+        max_profit_hedged=round(float(np.max(pnl_h)), 4),
+        max_loss_hedged=round(float(np.min(pnl_h)), 4),
+        legs_put=legs_put, net_put=gp, premium_put=gp["premium"],
+        ptype_put="debit" if gp["premium"] > 0 else "credit",
+        hedge_shares_put=round(float(hedge_shares_put), 4),
+        grid_put=grid_p, pnl_put=pnl_p, pnl_hedged_put=pnl_ph,
+        breakevens_put=breakevens_from(grid_p, pnl_p),
+        breakevens_hedged_put=breakevens_from(grid_p, pnl_ph),
+        max_profit_put=round(float(np.max(pnl_p)), 4),
+        max_loss_put=round(float(np.min(pnl_p)), 4),
+        max_profit_hedged_put=round(float(np.max(pnl_ph)), 4),
+        max_loss_hedged_put=round(float(np.min(pnl_ph)), 4),
+        requires=req_lvl, requires_reason=req_reason,
+        requires_put=reqp_lvl, requires_put_reason=reqp_reason))
 
   return dict(symbol=symbol, spot=S, q=q, today=today, strikeATM=Katm,
               shape=shape, term=term, sell_expiry=sell_e, long_expiry=long_e,
@@ -239,25 +314,36 @@ def analyze(symbol: str, ticker=None, spot=None, q=None):
 # --------------------------------------------------------------------------- #
 # payoff figure (matplotlib) -- used by the dashboard Strategies tab
 # --------------------------------------------------------------------------- #
-def fig_payoff(strat, S):
-  grid, pnl = strat["grid"], strat["pnl"]
+def fig_payoff(strat, S, variant="call"):
+  """Payoff curve for one structure. variant='call' (default) or 'put' selects
+  which set of legs to plot; both share horizon/spot, so put-equivalent trades
+  get their own curve (parity => similar shape, different breakevens/premium)."""
+  sfx = "_put" if variant == "put" else ""
+  grid = strat["grid" + sfx]
+  pnl = strat["pnl" + sfx]
   fig, ax = plt.subplots(figsize=(6.4, 3.5))
   ax.axhline(0, color="#8A95A2", lw=0.8)
   ax.fill_between(grid, pnl, 0, where=(pnl >= 0), color="#0E9E92", alpha=0.22)
   ax.fill_between(grid, pnl, 0, where=(pnl < 0), color="#C0392B", alpha=0.20)
-  ax.plot(grid, pnl, color="#0E9E92", lw=1.8)
+  ax.plot(grid, pnl, color="#0E9E92", lw=1.8, label="unhedged")
+  if ("pnl_hedged" + sfx) in strat:
+    ax.plot(grid, strat["pnl_hedged" + sfx], color="#10161D", lw=1.5, ls="--",
+            label=f"delta-hedged ({strat['hedge_shares' + sfx]:+.2f} sh/unit)")
+    ax.legend(loc="best", fontsize=7.5, framealpha=0.85)
   ax.axvline(S, color="#C6791E", ls="--", lw=1.0)
   ax.annotate(f"spot ${S:.0f}", xy=(S, ax.get_ylim()[1]),
               xytext=(3, -12), textcoords="offset points",
               color="#C6791E", fontsize=8)
-  for be in strat["breakevens"]:
+  for be in strat["breakevens" + sfx]:
     ax.plot([be], [0], "o", color="#10161D", ms=4)
     ax.annotate(f"${be:g}", xy=(be, 0), xytext=(0, 6),
                 textcoords="offset points", ha="center", fontsize=7.5)
   ax.set_xlabel("underlying at horizon")
   ax.set_ylabel("P&L / share ($)")
+  legs_lbl = "put legs" if variant == "put" else "call legs"
   ax.set_title(f"Payoff @ {strat['horizon_exp']} ({strat['horizon_days']}d)  "
-               f"{strat['ptype']} ${abs(strat['premium']):.2f}", fontsize=10)
+               f"{strat['ptype' + sfx]} ${abs(strat['premium' + sfx]):.2f}  "
+               f"[{legs_lbl}]", fontsize=10)
   ax.grid(alpha=0.25)
   fig.tight_layout()
   return fig
@@ -278,8 +364,12 @@ def report_and_save(res):
   print("=" * 74)
   if not res["strategies"]:
     print("No strategies (insufficient distinct expiries)."); return
+  req_lbl = {"spread": "SPREAD (defined risk)", "naked": "NAKED short (uncovered)",
+             "long": "long only"}
   for s in res["strategies"]:
     print(f"\n{s['name']}\n  {s['thesis']}")
+    print(f"  requires: {req_lbl.get(s['requires'], s['requires'])}"
+          f"  |  put version: {req_lbl.get(s['requires_put'], s['requires_put'])}")
     print(f"  {'leg':<7}{'exp':<12}{'d':>4} {'K':>6} {'mid':>7} {'IV%':>6} "
           f"{'delta':>7} {'theta/d':>8} {'vega':>6}")
     for L in s["legs"]:
@@ -291,9 +381,29 @@ def report_and_save(res):
     print(f"  NET {s['ptype']} ${abs(s['premium']):.2f}/sh "
           f"(${abs(s['premium'])*100:.0f}/contract)  delta {g['delta']:+.3f}  "
           f"gamma {g['gamma']:+.4f}  theta {g['theta']:+.3f}/d  vega {g['vega']:+.3f}")
+    print("  put-equivalent legs (same strikes; parity -> ~same vol trade):")
+    for L in s["legs_put"]:
+      side = f"{'+' if L['qty']>0 else ''}{L['qty']}{L['kind']}"
+      print(f"  {side:<7}{L['expiration']:<12}{L['t_days']:>4} {L['strike']:>6.0f} "
+            f"{L['mid']:>7.2f} {L['iv']*100:>6.1f} {L['delta']:>7.3f} "
+            f"{L['theta']:>8.3f} {L['vega']:>6.3f}")
+    gp = s["net_put"]
+    print(f"  NET {s['ptype_put']} ${abs(s['premium_put']):.2f}/sh "
+          f"(${abs(s['premium_put'])*100:.0f}/contract)  delta {gp['delta']:+.3f}  "
+          f"gamma {gp['gamma']:+.4f}  theta {gp['theta']:+.3f}/d  vega {gp['vega']:+.3f}"
+          f"  hedge {s['hedge_shares_put']:+.3f} sh/unit")
+    print(f"    put breakevens @ {s['horizon_exp']}: {s['breakevens_put']}  "
+          f"max +${s['max_profit_put']:.2f}/sh, min ${s['max_loss_put']:.2f}/sh")
     print(f"  breakevens @ {s['horizon_exp']}: {s['breakevens']}  "
           f"max +${s['max_profit']:.2f}/sh, min ${s['max_loss']:.2f}/sh "
           f"(long legs' IV held const)")
+    hs = s["hedge_shares"]
+    side = "long" if hs > 0 else "short"
+    print(f"  delta hedge: {side} {abs(hs):.3f} sh/unit "
+          f"({abs(hs)*100:.0f} sh per contract) -> delta-neutral at spot; "
+          f"hedged @ horizon: max +${s['max_profit_hedged']:.2f}/sh, "
+          f"min ${s['max_loss_hedged']:.2f}/sh, "
+          f"BE {s['breakevens_hedged'] or 'none'}")
   _save_audit(res)
   print("\nIllustrative only -- NOT investment advice. Check live fills, not mid.")
 
@@ -304,20 +414,28 @@ def _save_audit(res):
   base.mkdir(parents=True, exist_ok=True)
   leg_rows, strat_rows = [], []
   for s in res["strategies"]:
-    for L in s["legs"]:
-      leg_rows.append(dict(strategy=s["name"], qty=L["qty"], kind=L["kind"],
-                           expiration=L["expiration"], t_days=L["t_days"],
-                           strike=L["strike"], bid=L["bid"], ask=L["ask"],
-                           mid=round(L["mid"], 4), iv=round(L["iv"], 6),
-                           delta=round(L["delta"], 5), gamma=round(L["gamma"], 6),
-                           theta=round(L["theta"], 5), vega=round(L["vega"], 5)))
-    g = s["net"]
+    for variant, legs in (("call", s["legs"]), ("put", s["legs_put"])):
+      for L in legs:
+        leg_rows.append(strategy_leg_row(s["name"], variant, L))
+    g, gp = s["net"], s["net_put"]
     strat_rows.append(dict(strategy=s["name"], net_premium=round(s["premium"], 4),
                            type=s["ptype"], net_delta=round(g["delta"], 4),
                            net_gamma=round(g["gamma"], 5), net_theta=round(g["theta"], 4),
                            net_vega=round(g["vega"], 4),
+                           requires=s["requires"], put_requires=s["requires_put"],
+                           hedge_shares=s["hedge_shares"],
                            breakevens="|".join(map(str, s["breakevens"])),
                            max_profit=s["max_profit"], max_loss=s["max_loss"],
+                           breakevens_hedged="|".join(map(str, s["breakevens_hedged"])),
+                           max_profit_hedged=s["max_profit_hedged"],
+                           max_loss_hedged=s["max_loss_hedged"],
+                           put_net_premium=round(s["premium_put"], 4),
+                           put_type=s["ptype_put"], put_net_delta=round(gp["delta"], 4),
+                           put_net_vega=round(gp["vega"], 4),
+                           put_hedge_shares=s["hedge_shares_put"],
+                           put_breakevens="|".join(map(str, s["breakevens_put"])),
+                           put_max_profit=s["max_profit_put"],
+                           put_max_loss=s["max_loss_put"],
                            horizon=s["horizon_exp"]))
   write_strategy_csvs(base, leg_rows, strat_rows)
   manifest = dict(symbol=res["symbol"], generated_local=now.isoformat(timespec="seconds"),
@@ -327,6 +445,8 @@ def _save_audit(res):
                   atm_term_structure=res.get("term"),
                   assumptions=["mid=(bid+ask)/2", "greeks BSM at leg IV",
                                "payoff at earliest expiry; longer legs BSM, IV held",
+                               "delta hedge = -net_delta shares/unit, static (set at "
+                               "inception, held to horizon, not rehedged)",
                                "per share; contract x100; excl. commissions/slippage"],
                   disclaimer="Illustrative analysis, NOT investment advice.")
   (base / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -340,6 +460,15 @@ def _save_audit(res):
                 round(res["spot"], 4), res["q"], res["strikeATM"],
                 base.relative_to(ROOT).as_posix()])
   print(f"\naudit -> {base.relative_to(ROOT).as_posix()}/")
+
+
+def strategy_leg_row(strategy: str, variant: str, L: dict) -> dict:
+  """One audit row for a strategy leg; `variant` is 'call' or 'put'."""
+  return dict(strategy=strategy, variant=variant, qty=L["qty"], kind=L["kind"],
+              expiration=L["expiration"], t_days=L["t_days"], strike=L["strike"],
+              bid=L["bid"], ask=L["ask"], mid=round(L["mid"], 4), iv=round(L["iv"], 6),
+              delta=round(L["delta"], 5), gamma=round(L["gamma"], 6),
+              theta=round(L["theta"], 5), vega=round(L["vega"], 5))
 
 
 def write_strategy_csvs(base: Path, leg_rows, strat_rows):
