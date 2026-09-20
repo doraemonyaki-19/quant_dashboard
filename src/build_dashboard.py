@@ -27,7 +27,7 @@ from surfaces import (collect, div_yield, rate_for, spot_price,  # noqa: E402
                       fig_surface, fig_greeks, fig_params, _b64,
                       plotly_surface_html)
 from strategies import (analyze, fig_payoff, write_strategy_csvs,  # noqa: E402
-                        strategy_leg_row)
+                        strategy_leg_row, strategy_summary_row)
 from fetch_chain import chain_rows                             # noqa: E402
 
 
@@ -86,7 +86,8 @@ def compute_context(symbol: str, months: int = 12,
     strat = analyze(symbol, ticker=t, spot=S, q=q)
     for s in strat["strategies"]:
       s["payoff_png"] = _b64(fig_payoff(s, S))
-      s["payoff_png_put"] = _b64(fig_payoff(s, S, variant="put"))
+      if s.get("legs_put"):
+        s["payoff_png_put"] = _b64(fig_payoff(s, S, variant="put"))
   except Exception as e:
     sys.stderr.write(f"[strategies] warning: {e}\n")
 
@@ -213,29 +214,11 @@ def save_audit(ctx: dict) -> Path:
   if ctx.get("strat"):
     leg_rows, strat_rows = [], []
     for s in ctx["strat"]["strategies"]:
-      for variant, legs in (("call", s["legs"]), ("put", s["legs_put"])):
-        for L in legs:
-          leg_rows.append(strategy_leg_row(s["name"], variant, L))
-      g, gp = s["net"], s["net_put"]
-      strat_rows.append(dict(strategy=s["name"], net_premium=round(s["premium"], 4),
-                             type=s["ptype"], net_delta=round(g["delta"], 4),
-                             net_gamma=round(g["gamma"], 5), net_theta=round(g["theta"], 4),
-                             net_vega=round(g["vega"], 4),
-                             requires=s["requires"], put_requires=s["requires_put"],
-                             hedge_shares=s["hedge_shares"],
-                             breakevens="|".join(map(str, s["breakevens"])),
-                             max_profit=s["max_profit"], max_loss=s["max_loss"],
-                             breakevens_hedged="|".join(map(str, s["breakevens_hedged"])),
-                             max_profit_hedged=s["max_profit_hedged"],
-                             max_loss_hedged=s["max_loss_hedged"],
-                             put_net_premium=round(s["premium_put"], 4),
-                             put_type=s["ptype_put"], put_net_delta=round(gp["delta"], 4),
-                             put_net_vega=round(gp["vega"], 4),
-                             put_hedge_shares=s["hedge_shares_put"],
-                             put_breakevens="|".join(map(str, s["breakevens_put"])),
-                             put_max_profit=s["max_profit_put"],
-                             put_max_loss=s["max_loss_put"],
-                             horizon=s["horizon_exp"]))
+      strat_rows.append(strategy_summary_row(s))
+      for L in s["legs"]:
+        leg_rows.append(strategy_leg_row(s["name"], "base", L))
+      for L in (s.get("legs_put") or []):
+        leg_rows.append(strategy_leg_row(s["name"], "put_equiv", L))
     write_strategy_csvs(base, leg_rows, strat_rows)
 
   idx = ROOT / "data" / "audit" / "index.csv"
@@ -416,23 +399,25 @@ def _hedge_howto(strat: dict) -> str:
 
 
 def _strategy_panel(ctx: dict) -> str:
-  """Strategies tab: term-structure trade cards with payoff curves."""
+  """Strategies tab: term-structure + single-expiry trade cards with payoffs."""
   strat = ctx.get("strat")
   if not strat or not strat["strategies"]:
     return ('<div class="errbox" style="border-left-color:var(--warn)">'
             '<h2>No strategy set available</h2><p>The chain for this ticker '
-            'did not yield the expiries needed to build the term-structure '
-            'trades.</p></div>')
+            'did not yield the expiries needed to build the strategies.</p></div>')
   q_disp = "0" if strat["q"] < 1e-4 else f"{strat['q']*100:.2f}%"
   term_seq = " → ".join(f"{d['t_days']}d {d['iv']*100:.0f}%"
                         for d in strat.get("term", []))
   shape = strat.get("shape", "the term structure")
   out = [
-      f'<p class="strat-intro"><b>Term-structure trades for {strat["symbol"]}</b> '
+      f'<p class="strat-intro"><b>Options strategies for {strat["symbol"]}</b> '
       f'(spot ${strat["spot"]:,.2f}, q={q_disp}, ATM~{strat["strikeATM"]}). '
       f'This ticker&rsquo;s ATM term structure shows <b>{shape}</b> '
-      f'(<span class="mono">{term_seq}</span>). The trades below sell the '
-      'genuinely richest tenor for this shape against cheaper long-dated vol. '
+      f'(<span class="mono">{term_seq}</span>). Two families below: '
+      '<b>term-structure trades</b> (calendars/butterfly/diagonal) that sell the '
+      'richest tenor against cheaper long-dated vol, and <b>single-expiry '
+      'short-vol</b> structures (<b>iron condor / iron butterfly</b>) that harvest '
+      'the smile at one expiry with strikes scaled to the expected move. '
       'Priced from live mids; payoff is evaluated at the <b>earliest leg '
       'expiry</b>, longer legs revalued by BSM with IV held constant. Each payoff '
       'plot also shows a <b>delta-hedged</b> curve (dashed): a static stock '
@@ -453,8 +438,8 @@ def _strategy_panel(ctx: dict) -> str:
       'Long options only</button>'
       '<span class="sf-hint" id="strat-count"></span></div>'
       '<div id="strat-empty" class="flag" style="display:none">No trade here fits '
-      'that permission level. These are all short-vol / term-structure harvests, '
-      'so every one sells a leg &mdash; a strictly long-only account can&rsquo;t '
+      'that permission level. Every structure here sells at least one leg (they '
+      'are short-vol / spread trades), so a strictly long-only account can&rsquo;t '
       'run them as constructed.</div>')
 
   req_badge = {
@@ -478,8 +463,6 @@ def _strategy_panel(ctx: dict) -> str:
 
   for s in strat["strategies"]:
     legs = leg_rows_html(s["legs"])
-    legs_put = leg_rows_html(s["legs_put"])
-    gp, hsp = s["net_put"], s["hedge_shares_put"]
     g = s["net"]
     prem_chip = (f'<span class="chip {s["ptype"]}">'
                  f'{s["ptype"]} ${abs(s["premium"]):.2f}/sh'
@@ -497,11 +480,40 @@ def _strategy_panel(ctx: dict) -> str:
           if s["breakevens"] else "none in range")
     be_h = (", ".join(f"${b:g}" for b in s["breakevens_hedged"])
             if s["breakevens_hedged"] else "none in range")
-    be_p = (", ".join(f"${b:g}" for b in s["breakevens_put"])
-            if s["breakevens_put"] else "none in range")
-    be_ph = (", ".join(f"${b:g}" for b in s["breakevens_hedged_put"])
-             if s["breakevens_hedged_put"] else "none in range")
     rq_cls, rq_lbl, rq_tip = req_badge.get(s["requires"], req_badge["naked"])
+
+    # Put-equivalent panel only for single-type structures (calendars/diagonals/
+    # butterflies); iron condor/butterfly already mix puts+calls so there's none.
+    put_details = ""
+    if s.get("legs_put"):
+      gp, hsp = s["net_put"], s["hedge_shares_put"]
+      be_p = (", ".join(f"${b:g}" for b in s["breakevens_put"])
+              if s["breakevens_put"] else "none in range")
+      be_ph = (", ".join(f"${b:g}" for b in s["breakevens_hedged_put"])
+               if s["breakevens_hedged_put"] else "none in range")
+      pr_cls, pr_lbl, _ = req_badge.get(s["requires_put"], req_badge["naked"])
+      same_req = (" &mdash; same requirement as the call version"
+                  if s["requires_put"] == s["requires"]
+                  else " &mdash; differs from the call version")
+      put_details = (
+          '<details class="strat-alt"><summary>Put-equivalent structure (same '
+          'strikes &mdash; trade whichever fills better)</summary>'
+          '<div class="tablewrap"><table>'
+          f'{head}<tbody>{leg_rows_html(s["legs_put"])}</tbody></table></div>'
+          f'<div class="strat-be">NET {s["ptype_put"]} '
+          f'${abs(s["premium_put"]):.2f}/sh &middot; &Delta; {gp["delta"]:+.3f} '
+          f'&middot; vega {gp["vega"]:+.3f} &middot; hedge '
+          f'{"+" if hsp > 0 else ""}{hsp:.2f} sh/unit</div>'
+          f'<div class="strat-be">Breakevens @ {s["horizon_exp"]}: {be_p} '
+          f'&middot; max +${s["max_profit_put"]:.2f} / '
+          f'min ${s["max_loss_put"]:.2f} per sh &middot; hedged BE {be_ph}</div>'
+          f'<div class="strat-plot"><img src="{s["payoff_png_put"]}" '
+          f'alt="put-equivalent payoff curve for {s["name"]}"></div>'
+          f'<div class="strat-be">Put version requires: '
+          f'<span class="req {pr_cls}">{pr_lbl}</span>{same_req}. Put-call parity '
+          'keeps the vol trade &amp; payoff shape ~identical; premium, delta &amp; '
+          'assignment differ.</div></details>')
+
     out.append(
         f'<div class="strat" data-requires="{s["requires"]}">'
         f'<div class="strat-hd"><h3>{s["name"]}'
@@ -516,26 +528,7 @@ def _strategy_panel(ctx: dict) -> str:
         f'<div class="strat-be">Delta-hedged ({"+" if hs > 0 else ""}{hs:.2f} sh/unit, '
         f'static): BE {be_h} &middot; max +${s["max_profit_hedged"]:.2f} / '
         f'min ${s["max_loss_hedged"]:.2f} per sh</div>'
-        '<details class="strat-alt"><summary>Put-equivalent structure (same '
-        'strikes &mdash; trade whichever fills better)</summary>'
-        '<div class="tablewrap"><table>'
-        f'{head}<tbody>{legs_put}</tbody></table></div>'
-        f'<div class="strat-be">NET {s["ptype_put"]} '
-        f'${abs(s["premium_put"]):.2f}/sh &middot; &Delta; {gp["delta"]:+.3f} '
-        f'&middot; vega {gp["vega"]:+.3f} &middot; hedge '
-        f'{"+" if hsp > 0 else ""}{hsp:.2f} sh/unit</div>'
-        f'<div class="strat-be">Breakevens @ {s["horizon_exp"]}: {be_p} '
-        f'&middot; max +${s["max_profit_put"]:.2f} / '
-        f'min ${s["max_loss_put"]:.2f} per sh &middot; hedged BE {be_ph}</div>'
-        f'<div class="strat-plot"><img src="{s["payoff_png_put"]}" '
-        f'alt="put-equivalent payoff curve for {s["name"]}"></div>'
-        f'<div class="strat-be">Put version requires: '
-        f'<span class="req {req_badge.get(s["requires_put"], req_badge["naked"])[0]}">'
-        f'{req_badge.get(s["requires_put"], req_badge["naked"])[1]}</span>'
-        f'{" &mdash; same as the call version" if s["requires_put"] == s["requires"] else " &mdash; differs from the call version (strike coverage flips for puts)"}'
-        '. Put-call parity keeps the vol trade &amp; payoff shape ~identical; '
-        'premium, delta &amp; assignment differ.</div>'
-        '</details>'
+        f'{put_details}'
         '</div>'
         f'<div class="strat-plot"><img src="{s["payoff_png"]}" '
         f'alt="payoff curve for {s["name"]}"></div>'

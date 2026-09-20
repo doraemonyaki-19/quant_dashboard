@@ -32,8 +32,10 @@ python src/app.py                          # serves http://127.0.0.1:8000
 Open the URL, type a ticker (SPCX, AAPL, SPY, TSLA, …), press **Analyze**. The
 backend pulls that ticker's live chain, inverts Black-Scholes per option, builds
 the vol surface / greeks(T) / parameters(T), scores the candidate models, and
-returns the dashboard. Each run is ~30–60s (fetch + surface + American-binomial
-scoring). Dividend yield `q` is read from trailing dividends per ticker.
+returns the dashboard. Each run is ~15–40s (fetch + surface + American-binomial
+scoring); the CRR scoring — historically the bottleneck — was optimized by
+hoisting the tree's `pow()` calls out of its inner loop (bit-identical results,
+~4× faster). Dividend yield `q` is read from trailing dividends per ticker.
 
 The **3D vol surface is interactive** — drag to rotate, scroll to zoom,
 double-click to reset. Plotly is **bundled locally** (no CDN): the app serves it
@@ -223,6 +225,7 @@ and falls back to `yahoo_iv` otherwise.
 ```
 spcx_model/
 ├── README.md                     ← you are here (hypotheses + conclusion)
+├── CONTINUATION_PROMPT.md         ← handoff: recent work, gotchas, open threads
 ├── dashboard.html                ← static, self-contained dashboard (build_dashboard output)
 ├── docs/
 │   └── MODELS.md                 ← the math for models, surface, greeks(T), params(T)
@@ -233,7 +236,7 @@ spcx_model/
 │   ├── surfaces.py               ← data-binned vol surface + greeks(T) + params(T);
 │   │                                figure builders + interactive plotly 3D + plotly_js()
 │   ├── determine_model.py        ← score_rows()/score_models() + --demo + --snapshot
-│   ├── strategies.py             ← term-structure trades: analyze() + payoff curves
+│   ├── strategies.py             ← analyze(): term-structure + iron condor/fly; delta hedge, put-equiv, requires badge
 │   ├── build_dashboard.py        ← compute_context(symbol) + render_dashboard(); Analysis + Strategies tabs
 │   └── app.py                    ← local web app: ticker box; serves bundled /plotly.js
 ├── data/
@@ -277,31 +280,60 @@ once at `/plotly.js` (browser-cached), and `build_dashboard.py` inlines it into
 `dashboard.html` so the file — and a re-published Artifact — render the rotatable
 surface offline.
 
-## Strategies tab — term-structure trades with payoff curves
+## Strategies tab — two families, with hedging, put-equivalents and payoff curves
 
 The dashboard has two tabs: **Analysis** (the surface / greeks / scoring above)
-and **Strategies**. The Strategies tab is **data-driven and shape-adaptive**
-(`strategies.py`): it reads the ticker's own ATM vol term structure, classifies
-the shape, and builds trades that **sell the genuinely richest tenor** for that
-shape against cheaper long-dated vol — no hardcoded narrative. The classifier
-picks one of:
+and **Strategies**. The Strategies tab is **data-driven** (`strategies.py`):
+every leg is priced from live mids, every greek is real. It builds two families.
+
+**Family 1 — term-structure trades (shape-adaptive).** Reads the ticker's own ATM
+vol term structure, classifies the shape, and **sells the genuinely richest
+tenor** against cheaper long-dated vol — no hardcoded narrative:
 
 - **Interior hump** (an intermediate tenor is a local max) → a **term-vol
-  butterfly** shorting the peak (e.g. SPCX: `10d 85% → 38d 94% → 59d 86%` →
-  short the 38d).
+  butterfly** shorting the peak (e.g. `10d 85% → 38d 94% → 59d 86%` → short 38d).
 - **Backwardation** (rich front, cheap back) → **calendars** shorting the rich
-  front (e.g. CVX: `10d 36% → 150d 27%` → sell the 36% front, own the 27% back).
+  front (e.g. `10d 36% → 150d 27%` → sell the 36% front, own the 27% back).
 - **Upward / flat** → calendars/diagonal at the highest-IV sellable tenor.
 
-Each ticker gets up to three structures (a butterfly-or-calendar, a second
-calendar at a different tenor, and a bullish diagonal). Every card shows the legs
-(strike/mid/IV/greeks), net premium + net greeks, and a **payoff curve**
-evaluated at the earliest leg expiry (longer legs revalued by BSM, IV held
-constant), with breakevens marked. The detected shape and real term structure are
-printed in the tab intro; legs + summary go to the run's audit bundle
-(`strategy_legs.csv`, `strategies.csv`, plus `term_structure_shape` in the
-manifest). **Illustrative only — not investment advice**; spreads can be wide, so
-price against real fills.
+Yields three structures: a butterfly-or-calendar, a second calendar at a
+different tenor, and a bullish diagonal.
+
+**Family 2 — single-expiry short-vol (iron condor / iron butterfly).** Harvests
+the smile at **one** expiry (~40 DTE) instead of the term structure. Strikes are
+**scaled to the expected move** (`ATM IV · √T`), so the shorts sit ~1σ OTM no
+matter how high the name's vol is — a fixed-percent condor would be nonsensical
+on an ~90%-vol name like SPCX (1σ at 40 DTE is ±~30%). The condor sells a ~1σ
+strangle inside ~1.6σ wings; the fly sells the ATM straddle inside ±1σ wings.
+Both are four-leg **defined-risk credit** spreads (short vega/gamma, positive
+theta), a clean contrast to the long-vega calendars.
+
+**Per-card features (both families):**
+
+- **Legs + net greeks** — strike/mid/IV/δ/Θ/vega per leg, net premium + net
+  δ/Γ/Θ/vega chips.
+- **Static delta hedge** — a `−netΔ` share position (per option unit) that zeros
+  directional exposure at spot; shown as a **dashed curve** on every payoff plot.
+  Because a delta hedge is only a first-order tangent, the dashed curve still
+  bends with **gamma** — that curvature *is* the vol/gamma edge.
+- **Put-equivalent** (single-type structures only) — the same calendar/diagonal
+  expressed with puts (parity ⇒ ~identical payoff; different premium/delta/
+  assignment), with **its own payoff curve**, in a collapsible panel. Skipped for
+  the iron structures, which already mix puts and calls.
+- **`requires` badge + account filter** — each card is tagged **Spread** (every
+  short leg covered by a same-type long of ≥ tenor ⇒ defined-risk, no naked
+  approval) or **Naked** (an uncovered short, e.g. the term butterfly's middle
+  leg across three expiries). A top-of-tab filter (*naked & spreads / spreads
+  only / long-only*) hides the cards your account can't trade.
+- **Payoff curve** — evaluated at the earliest leg expiry (longer legs revalued
+  by BSM, IV held constant), breakevens marked, hedged and unhedged.
+
+Legs + summary go to the run's audit bundle (`strategy_legs.csv`,
+`strategies.csv`, plus `term_structure_shape` in the manifest). **Illustrative
+only — not investment advice**; spreads can be wide, so price against real fills.
+No realized-P&L / backtest exists — every payoff is a *forward* theoretical curve
+(`yfinance` has no historical option quotes; a backtest needs a historical
+options vendor — see `CONTINUATION_PROMPT.md`).
 
 ## Audit trail — every calculation is saved
 
@@ -315,7 +347,7 @@ the exact data used and the results to `data/audit/<SYMBOL>_<timestamp>/`:
 | `term_structure.csv`  | per-expiry ATM IV, all five greeks, rate, forward                                                                                               |
 | `scoring_chain.csv`   | the**raw** featured-expiry chain (bid/ask/last/Yahoo-IV) fed to the model scoring                                                         |
 | `scoring_results.csv` | the per-model RMSE table                                                                                                                        |
-| `strategy_legs.csv` / `strategies.csv` | each strategy's legs (mid/IV/greeks) and net premium/greeks/breakevens |
+| `strategy_legs.csv` / `strategies.csv` | each strategy's legs (mid/IV/greeks) with a `variant` column (`base` / `put_equiv`), and the summary — net premium/greeks/breakevens, `requires` (spread/naked), `hedge_shares`, and the delta-hedged + put-equivalent metrics |
 
 **Honest data coverage.** `manifest.json → expiry_coverage` records how many
 expiries were in the 12-month window vs how many produced a full-enough smile
